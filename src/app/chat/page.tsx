@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useTheme } from "@/lib/theme-context";
 import ReactMarkdown from "react-markdown";
@@ -45,9 +45,9 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
   if (isInline) return <code className="rounded-md bg-zinc-700/60 px-1.5 py-0.5 text-sm font-mono text-pink-300">{children}</code>;
   const language = className.replace(/^language-/, "");
   return (
-    <div className="mb-4 mt-2 rounded-xl border border-zinc-700/50 overflow-hidden">
-      <div className="flex items-center justify-between bg-zinc-900 px-4 py-1.5 border-b border-zinc-700/50">
-        <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">{language}</span>
+    <div className="mb-4 mt-2 rounded-xl border border-zinc-700/50 overflow-hidden max-w-full">
+      <div className="flex items-center justify-between bg-zinc-900 px-3 sm:px-4 py-1.5 border-b border-zinc-700/50">
+        <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider truncate">{language}</span>
         <button onClick={async () => { await copyToClipboard(codeString); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
           className="flex items-center gap-1.5 text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors">
           {copied ? (
@@ -100,14 +100,27 @@ export default function ChatPage() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
+  // Streaming latency optimizations
+  const [streamingContent, setStreamingContent] = useState("");
+  const streamingContentRef = useRef("");
+  const streamingIdRef = useRef<string | null>(null);
+  const lastRenderRef = useRef(0);
+  const userScrolledUpRef = useRef(false);
+
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const renameRef = useRef<HTMLInputElement>(null);
 
   // Derive local messages from active conversation
-  const messages: StoredMessage[] = activeConversation?.messages ?? [];
+  const storedMessages: StoredMessage[] = activeConversation?.messages ?? [];
+  const messages = streamingIdRef.current && streamingContent
+    ? storedMessages.map((m) =>
+        m.id === streamingIdRef.current ? { ...m, content: streamingContent } : m,
+      )
+    : storedMessages;
 
   const setMessages = useCallback(
     (updater: StoredMessage[] | ((prev: StoredMessage[]) => StoredMessage[]), convId?: string) => {
@@ -131,7 +144,20 @@ export default function ChatPage() {
   }, [activeId]);
 
   // Effects
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  useEffect(() => {
+    if (!userScrolledUpRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages]);
+
+  // Reset scroll lock when user manually scrolls to bottom
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const threshold = 100;
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    userScrolledUpRef.current = !isNearBottom;
+  }, []);
   useEffect(() => {
     const el = textareaRef.current;
     if (el) { el.style.height = "auto"; el.style.height = `${Math.min(el.scrollHeight, 160)}px`; }
@@ -153,22 +179,89 @@ export default function ChatPage() {
     const controller = new AbortController();
     abortRef.current = controller;
     setIsLoading(true);
+
     const aiId = crypto.randomUUID();
+    streamingIdRef.current = aiId;
+    streamingContentRef.current = "";
+    lastRenderRef.current = 0;
+
     const tempMsg: StoredMessage = { id: aiId, role: "assistant", content: "", timestamp: now() };
     setMessages((prev) => [...prev, tempMsg], id);
 
+    const parseSSE = (chunk: string, buffer: string): { text: string; rest: string } => {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      const rest = lines.pop() ?? "";
+      let text = "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === "data: [DONE]") continue;
+        if (!trimmed.startsWith("data: ")) continue;
+        try {
+          const json = JSON.parse(trimmed.slice(6));
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) text += delta;
+        } catch {}
+      }
+      return { text, rest };
+    };
+
     try {
-      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messages: history }), signal: controller.signal });
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+      const res = await fetch(`${apiBase}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: history }),
+        signal: controller.signal,
+      });
       if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || `Request failed (${res.status})`); }
+
       const reader = res.body?.getReader();
       if (!reader) throw new Error("No response body");
       const decoder = new TextDecoder();
       let acc = "";
-      while (true) { const { done, value } = await reader.read(); if (done) break; acc += decoder.decode(value, { stream: true }); setMessages((prev) => prev.map((m) => m.id === aiId ? { ...m, content: acc } : m), id); }
+      let sseBuffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const { text, rest } = parseSSE(chunk, sseBuffer);
+        sseBuffer = rest;
+
+        if (text) {
+          const isFirstContent = !streamingContentRef.current;
+          acc += text;
+          streamingContentRef.current = acc;
+
+          const now = Date.now();
+          if (isFirstContent || now - lastRenderRef.current > 50) {
+            lastRenderRef.current = now;
+            setStreamingContent(acc);
+          }
+        }
+      }
+
+      streamingIdRef.current = null;
+      setStreamingContent("");
+      setMessages((prev) => prev.map((m) => m.id === aiId ? { ...m, content: acc } : m), id);
     } catch (err: unknown) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
+      if (err instanceof DOMException && err.name === "AbortError") {
+        const partial = streamingContentRef.current;
+        if (partial) {
+          setMessages((prev) => prev.map((m) => m.id === aiId ? { ...m, content: partial } : m), id);
+        }
+        return;
+      }
       setMessages((prev) => prev.map((m) => m.id === aiId ? { ...m, content: m.content || (err instanceof Error ? err.message : "Something went wrong") } : m), id);
-    } finally { setIsLoading(false); abortRef.current = null; }
+    } finally {
+      setIsLoading(false);
+      abortRef.current = null;
+      streamingIdRef.current = null;
+      streamingContentRef.current = "";
+      setStreamingContent("");
+    }
   }, [activeConversation, setMessages]);
 
   const handleSend = useCallback((text?: string) => {
@@ -244,7 +337,7 @@ export default function ChatPage() {
       {/* ── Sidebar ─────────────────────────────── */}
       <aside className={`flex-shrink-0 w-72 flex flex-col z-50 transition-transform duration-300
         ${isDark ? "bg-[#171717] border-r border-zinc-800/60" : "bg-zinc-50 border-r border-zinc-200/80"}
-        ${sidebarOpen ? "fixed inset-y-0 left-0 shadow-2xl" : "hidden"} lg:relative lg:flex`}>
+        ${sidebarOpen ? "fixed inset-y-0 left-0 shadow-2xl z-50" : "hidden"} lg:relative lg:flex`}>
         <div className={`flex items-center justify-between px-4 h-14 shrink-0 ${isDark ? "border-b border-zinc-800/60" : "border-b border-zinc-200/80"}`}>
           <a href="/" className="text-lg font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">GotKai</a>
           <button onClick={() => setSidebarOpen(false)}
@@ -294,14 +387,14 @@ export default function ChatPage() {
                   </svg>
                   <span className="truncate flex-1 text-left">{conv.title || "Untitled"}</span>
                   {/* Actions */}
-                  <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+                  <div className="hidden group-hover:flex items-center gap-0.5 shrink-0 sm:flex">
                     <button onClick={(e) => { e.stopPropagation(); setRenamingId(conv.id); setRenameValue(conv.title); }}
-                      className="size-6 flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700/50 transition-colors" title="Rename">
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3"><path d="M21.731 2.269a2.625 2.625 0 0 0-3.712 0l-1.157 1.157 3.712 3.712 1.157-1.157a2.625 2.625 0 0 0 0-3.712ZM19.513 8.199l-3.712-3.712-8.4 8.4a5.25 5.25 0 0 0-1.32 2.214l-.8 2.685a.75.75 0 0 0 .933.933l2.685-.8a5.25 5.25 0 0 0 2.214-1.32l8.4-8.4Z" /><path d="M5.25 5.25a3 3 0 0 0-3 3v10.5a3 3 0 0 0 3 3h10.5a3 3 0 0 0 3-3V13.5a.75.75 0 0 0-1.5 0v5.25a1.5 1.5 0 0 1-1.5 1.5H5.25a1.5 1.5 0 0 1-1.5-1.5V8.25a1.5 1.5 0 0 1 1.5-1.5h5.25a.75.75 0 0 0 0-1.5H5.25Z" /></svg>
+                      className="size-7 sm:size-6 flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700/50 transition-colors active:scale-90" title="Rename">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5 sm:size-3"><path d="M21.731 2.269a2.625 2.625 0 0 0-3.712 0l-1.157 1.157 3.712 3.712 1.157-1.157a2.625 2.625 0 0 0 0-3.712ZM19.513 8.199l-3.712-3.712-8.4 8.4a5.25 5.25 0 0 0-1.32 2.214l-.8 2.685a.75.75 0 0 0 .933.933l2.685-.8a5.25 5.25 0 0 0 2.214-1.32l8.4-8.4Z" /><path d="M5.25 5.25a3 3 0 0 0-3 3v10.5a3 3 0 0 0 3 3h10.5a3 3 0 0 0 3-3V13.5a.75.75 0 0 0-1.5 0v5.25a1.5 1.5 0 0 1-1.5 1.5H5.25a1.5 1.5 0 0 1-1.5-1.5V8.25a1.5 1.5 0 0 1 1.5-1.5h5.25a.75.75 0 0 0 0-1.5H5.25Z" /></svg>
                     </button>
                     <button onClick={(e) => { e.stopPropagation(); deleteConversation(conv.id); }}
-                      className="size-6 flex items-center justify-center rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/20 transition-colors" title="Delete">
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3"><path fillRule="evenodd" d="M16.5 4.478v.227a48.816 48.816 0 0 1 3.878.512.75.75 0 1 1-.256 1.478l-.209-.035-1.005 13.07a3 3 0 0 1-2.991 2.77H8.084a3 3 0 0 1-2.991-2.77L4.087 6.66l-.209.035a.75.75 0 0 1-.256-1.478A48.567 48.567 0 0 1 7.5 4.705v-.227c0-1.564 1.213-2.9 2.816-2.951a52.662 52.662 0 0 1 3.369 0c1.603.051 2.815 1.387 2.815 2.951Zm-6.136-1.452a51.196 51.196 0 0 1 3.273 0C14.39 3.05 15 3.684 15 4.478v.113a49.488 49.488 0 0 0-6 0v-.113c0-.794.609-1.428 1.364-1.452Zm-.355 5.945a.75.75 0 1 0-1.5.058l.347 9a.75.75 0 1 0 1.499-.058l-.346-9Zm5.48.058a.75.75 0 1 0-1.498-.058l-.347 9a.75.75 0 0 0 1.5.058l.345-9Z" clipRule="evenodd" /></svg>
+                      className="size-7 sm:size-6 flex items-center justify-center rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/20 transition-colors active:scale-90" title="Delete">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5 sm:size-3"><path fillRule="evenodd" d="M16.5 4.478v.227a48.816 48.816 0 0 1 3.878.512.75.75 0 1 1-.256 1.478l-.209-.035-1.005 13.07a3 3 0 0 1-2.991 2.77H8.084a3 3 0 0 1-2.991-2.77L4.087 6.66l-.209.035a.75.75 0 0 1-.256-1.478A48.567 48.567 0 0 1 7.5 4.705v-.227c0-1.564 1.213-2.9 2.816-2.951a52.662 52.662 0 0 1 3.369 0c1.603.051 2.815 1.387 2.815 2.951Zm-6.136-1.452a51.196 51.196 0 0 1 3.273 0C14.39 3.05 15 3.684 15 4.478v.113a49.488 49.488 0 0 0-6 0v-.113c0-.794.609-1.428 1.364-1.452Zm-.355 5.945a.75.75 0 1 0-1.5.058l.347 9a.75.75 0 1 0 1.499-.058l-.346-9Zm5.48.058a.75.75 0 1 0-1.498-.058l-.347 9a.75.75 0 0 0 1.5.058l.345-9Z" clipRule="evenodd" /></svg>
                     </button>
                   </div>
                 </div>
@@ -334,13 +427,13 @@ export default function ChatPage() {
       {/* ── Main Area ───────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
-        <header className={`flex items-center justify-between px-4 h-14 shrink-0 border-b ${isDark ? "border-zinc-800/60 bg-[#212121]/80 backdrop-blur-xl" : "border-zinc-200/80 bg-white/80 backdrop-blur-xl"}`}>
-          <div className="flex items-center gap-3">
+        <header className={`flex items-center justify-between px-3 sm:px-4 h-12 sm:h-14 shrink-0 border-b ${isDark ? "border-zinc-800/60 bg-[#212121]/80 backdrop-blur-xl" : "border-zinc-200/80 bg-white/80 backdrop-blur-xl"}`}>
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <button onClick={() => setSidebarOpen(true)}
-              className={`size-8 flex items-center justify-center rounded-lg ${isDark ? "text-zinc-400 hover:text-white hover:bg-zinc-800" : "text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100"}`}>
+              className={`size-7 sm:size-8 flex items-center justify-center rounded-lg ${isDark ? "text-zinc-400 hover:text-white hover:bg-zinc-800" : "text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100"}`}>
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5"><path fillRule="evenodd" d="M3 6.75A.75.75 0 0 1 3.75 6h16.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 6.75ZM3 12a.75.75 0 0 1 .75-.75h16.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 12Zm0 5.25a.75.75 0 0 1 .75-.75h16.5a.75.75 0 0 1 0 1.5H3.75a.75.75 0 0 1-.75-.75Z" clipRule="evenodd" /></svg>
             </button>
-            <span className={`text-sm font-medium ${isDark ? "text-zinc-400" : "text-zinc-500"}`}>
+            <span className={`text-sm font-medium truncate ${isDark ? "text-zinc-400" : "text-zinc-500"}`}>
               {activeConversation?.title ? activeConversation.title.substring(0, 30) : "New Chat"}
             </span>
           </div>
@@ -352,8 +445,9 @@ export default function ChatPage() {
         </header>
 
         {/* Messages */}
-        <div className={`flex-1 overflow-y-auto ${isDark ? "bg-[#212121]" : "bg-zinc-50/50"}`}>
-          <div className="mx-auto max-w-[850px] px-4 py-6 md:px-6 lg:px-8">
+        <div ref={messagesContainerRef} onScroll={handleMessagesScroll}
+          className={`flex-1 overflow-y-auto ${isDark ? "bg-[#212121]" : "bg-zinc-50/50"}`}>
+          <div className="mx-auto max-w-[850px] px-2 sm:px-4 py-4 sm:py-6 md:px-6 lg:px-8">
             {!activeConversation ? (
               <div className="flex flex-col items-center justify-center h-full min-h-[60vh]">
                 <EmptyState />
@@ -397,9 +491,9 @@ export default function ChatPage() {
 
         {/* Input */}
         <div className={`border-t shrink-0 ${isDark ? "border-zinc-800/60" : "border-zinc-200/80"}`}>
-          <div className={`px-4 py-4 ${isDark ? "bg-[#212121]" : "bg-white"}`}>
+          <div className={`px-3 sm:px-4 py-3 sm:py-4 ${isDark ? "bg-[#212121]" : "bg-white"}`}>
             <div className="mx-auto max-w-[850px]">
-              <div className={`relative flex items-end gap-2 rounded-2xl border px-4 py-3 transition-all
+              <div className={`relative flex items-end gap-1.5 sm:gap-2 rounded-2xl border px-3 sm:px-4 py-2.5 sm:py-3 transition-all
                 ${isDark ? "border-zinc-700/50 bg-[#2a2a2a] focus-within:border-zinc-500" : "border-zinc-200/80 bg-zinc-50 focus-within:border-zinc-300"}`}>
                 <button className={`shrink-0 flex items-center justify-center size-8 rounded-xl transition-colors ${isDark ? "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800" : "text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200"}`} title="Attach file">
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5"><path fillRule="evenodd" d="M18.97 3.659a2.25 2.25 0 0 0-3.182 0l-10.94 10.94a3.75 3.75 0 1 0 5.304 5.303l7.693-7.693a.75.75 0 0 1 1.06 1.06l-7.693 7.693a5.25 5.25 0 1 1-7.424-7.424l10.939-10.94a3.75 3.75 0 1 1 5.303 5.304L9.097 16.835a2.25 2.25 0 0 1-3.182-3.182l8.485-8.486a.75.75 0 0 1 1.06 1.06L8.977 14.815a.75.75 0 0 0 1.06 1.06l8.934-8.934a2.25 2.25 0 0 0 0-3.182Z" clipRule="evenodd" /></svg>
@@ -417,7 +511,7 @@ export default function ChatPage() {
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4"><path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" /></svg>
                 </motion.button>
               </div>
-              <p className={`mt-2 text-center text-[11px] ${isDark ? "text-zinc-600" : "text-zinc-400"}`}>GotKai can make mistakes. Verify important information.</p>
+              <p className={`mt-2 text-center text-[10px] sm:text-[11px] leading-tight ${isDark ? "text-zinc-600" : "text-zinc-400"}`}>GotKai can make mistakes. Verify important information.</p>
             </div>
           </div>
         </div>
@@ -430,27 +524,27 @@ export default function ChatPage() {
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center gap-3">
-      <div className="size-14 rounded-2xl bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-xl font-bold text-white shadow-lg shadow-blue-600/20">
+    <div className="flex flex-col items-center gap-2 sm:gap-3 px-4 text-center">
+      <div className="size-12 sm:size-14 rounded-2xl bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-lg sm:text-xl font-bold text-white shadow-lg shadow-blue-600/20">
         G
       </div>
-      <h2 className="text-lg font-semibold text-zinc-300">GotKai</h2>
-      <p className="text-sm text-zinc-500">Start a conversation by sending a message below.</p>
+      <h2 className="text-base sm:text-lg font-semibold text-zinc-300">GotKai</h2>
+      <p className="text-xs sm:text-sm text-zinc-500">Start a conversation by sending a message below.</p>
     </div>
   );
 }
 
-function ChatBubble({ message, isDark, hydrated, isStreaming, onEdit, onRegenerate }: {
+const ChatBubble = memo(function ChatBubble({ message, isDark, hydrated, isStreaming, onEdit, onRegenerate }: {
   message: StoredMessage; isDark: boolean; hydrated: boolean; isStreaming: boolean; onEdit?: () => void; onRegenerate?: () => void;
 }) {
   const isUser = message.role === "user";
   return (
-    <div className={`flex gap-4 px-4 py-4 group ${isUser ? "flex-row-reverse" : ""}`}>
-      <div className={`shrink-0 mt-0.5 size-8 rounded-full flex items-center justify-center text-xs font-bold shadow-lg ${isUser ? "bg-gradient-to-br from-indigo-500 to-purple-600 text-white" : "bg-gradient-to-br from-blue-600 to-cyan-500 text-white shadow-blue-500/20"}`}>
+    <div className={`flex gap-2 sm:gap-4 px-2 sm:px-4 py-2 sm:py-4 group ${isUser ? "flex-row-reverse" : ""}`}>
+      <div className={`shrink-0 mt-0.5 size-6 sm:size-8 rounded-full flex items-center justify-center text-xs font-bold shadow-lg ${isUser ? "bg-gradient-to-br from-indigo-500 to-purple-600 text-white" : "bg-gradient-to-br from-blue-600 to-cyan-500 text-white shadow-blue-500/20"}`}>
         {isUser ? "U" : "G"}
       </div>
       <div className={`flex flex-col min-w-0 ${isUser ? "items-end" : "items-start"}`}>
-        <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed md:text-base max-w-[90%] md:max-w-[85%] ${isUser ? "bg-gradient-to-br from-indigo-600 to-purple-700 text-white rounded-tr-md" : isDark ? "bg-[#2f2f2f] border border-zinc-700/30" : "bg-white border border-zinc-200/80 shadow-sm rounded-tl-md"}`}>
+        <div className={`rounded-2xl px-3 sm:px-4 py-2 sm:py-3 text-sm leading-relaxed md:text-base max-w-[95%] sm:max-w-[90%] md:max-w-[85%] ${isUser ? "bg-gradient-to-br from-indigo-600 to-purple-700 text-white rounded-tr-md" : isDark ? "bg-[#2f2f2f] border border-zinc-700/30" : "bg-white border border-zinc-200/80 shadow-sm rounded-tl-md"}`}>
           {isUser ? (
             <p className="whitespace-pre-wrap">{message.content}</p>
           ) : isStreaming && !message.content ? (
@@ -463,36 +557,36 @@ function ChatBubble({ message, isDark, hydrated, isStreaming, onEdit, onRegenera
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{message.content}</ReactMarkdown>
           )}
         </div>
-        <div className={`flex items-center gap-1 mt-1 px-1 opacity-0 group-hover:opacity-100 transition-opacity ${isUser ? "flex-row-reverse" : ""}`}>
+        <div className={`flex items-center gap-1 mt-1 px-1 opacity-0 group-hover:opacity-100 transition-opacity flex-wrap ${isUser ? "flex-row-reverse" : ""}`}>
           {hydrated && message.timestamp && (
             <span className={`text-[11px] ${isDark ? "text-zinc-600" : "text-zinc-400"}`}>{formatDate(message.timestamp)}</span>
           )}
           <CopyMessageButton text={message.content} />
           {isUser && onEdit && (
-            <button onClick={onEdit} className="flex size-6 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-all" title="Edit">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5"><path d="M21.731 2.269a2.625 2.625 0 0 0-3.712 0l-1.157 1.157 3.712 3.712 1.157-1.157a2.625 2.625 0 0 0 0-3.712ZM19.513 8.199l-3.712-3.712-8.4 8.4a5.25 5.25 0 0 0-1.32 2.214l-.8 2.685a.75.75 0 0 0 .933.933l2.685-.8a5.25 5.25 0 0 0 2.214-1.32l8.4-8.4Z" /><path d="M5.25 5.25a3 3 0 0 0-3 3v10.5a3 3 0 0 0 3 3h10.5a3 3 0 0 0 3-3V13.5a.75.75 0 0 0-1.5 0v5.25a1.5 1.5 0 0 1-1.5 1.5H5.25a1.5 1.5 0 0 1-1.5-1.5V8.25a1.5 1.5 0 0 1 1.5-1.5h5.25a.75.75 0 0 0 0-1.5H5.25Z" /></svg>
+            <button onClick={onEdit} className="flex size-7 sm:size-6 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-all active:scale-90" title="Edit">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4 sm:size-3.5"><path d="M21.731 2.269a2.625 2.625 0 0 0-3.712 0l-1.157 1.157 3.712 3.712 1.157-1.157a2.625 2.625 0 0 0 0-3.712ZM19.513 8.199l-3.712-3.712-8.4 8.4a5.25 5.25 0 0 0-1.32 2.214l-.8 2.685a.75.75 0 0 0 .933.933l2.685-.8a5.25 5.25 0 0 0 2.214-1.32l8.4-8.4Z" /><path d="M5.25 5.25a3 3 0 0 0-3 3v10.5a3 3 0 0 0 3 3h10.5a3 3 0 0 0 3-3V13.5a.75.75 0 0 0-1.5 0v5.25a1.5 1.5 0 0 1-1.5 1.5H5.25a1.5 1.5 0 0 1-1.5-1.5V8.25a1.5 1.5 0 0 1 1.5-1.5h5.25a.75.75 0 0 0 0-1.5H5.25Z" /></svg>
             </button>
           )}
           {!isUser && onRegenerate && (
-            <button onClick={onRegenerate} className="flex size-6 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-all" title="Regenerate">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5"><path fillRule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.919.53 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.984a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.53-.918Z" clipRule="evenodd" /></svg>
+            <button onClick={onRegenerate} className="flex size-7 sm:size-6 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-all active:scale-90" title="Regenerate">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4 sm:size-3.5"><path fillRule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.919.53 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.984a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.53-.918Z" clipRule="evenodd" /></svg>
             </button>
           )}
         </div>
       </div>
     </div>
   );
-}
+});
 
 function CopyMessageButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button onClick={async () => { await copyToClipboard(text); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-      className="flex size-6 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-all" title="Copy message">
+      className="flex size-7 sm:size-6 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-all active:scale-90" title="Copy message">
       {copied ? (
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5 text-green-400"><path fillRule="evenodd" d="M19.916 4.626a.75.75 0 0 1 .208 1.04l-9 13.5a.75.75 0 0 1-1.154.114l-6-6a.75.75 0 0 1 1.06-1.06l5.353 5.353 8.493-12.74a.75.75 0 0 1 1.04-.207Z" clipRule="evenodd" /></svg>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4 sm:size-3.5 text-green-400"><path fillRule="evenodd" d="M19.916 4.626a.75.75 0 0 1 .208 1.04l-9 13.5a.75.75 0 0 1-1.154.114l-6-6a.75.75 0 0 1 1.06-1.06l5.353 5.353 8.493-12.74a.75.75 0 0 1 1.04-.207Z" clipRule="evenodd" /></svg>
       ) : (
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5"><path fillRule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clipRule="evenodd" /><path fillRule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Z" clipRule="evenodd" /></svg>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4 sm:size-3.5"><path fillRule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clipRule="evenodd" /><path fillRule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Z" clipRule="evenodd" /></svg>
       )}
     </button>
   );
@@ -504,7 +598,7 @@ function EditBubble({ value, onChange, onSave, onCancel, isDark }: {
   return (
     <div className="flex gap-4 px-4 py-4 flex-row-reverse">
       <div className="shrink-0 mt-0.5 size-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-xs font-bold text-white">U</div>
-      <div className="max-w-[90%] md:max-w-[85%]">
+      <div className="max-w-[95%] sm:max-w-[90%] md:max-w-[85%]">
         <div className="rounded-2xl overflow-hidden border border-indigo-500/50 shadow-lg shadow-indigo-500/10">
           <textarea value={value} onChange={(e) => onChange(e.target.value)}
             className={`w-full resize-none px-4 py-3 text-sm outline-none ${isDark ? "bg-[#2f2f2f] text-white" : "bg-white text-zinc-900"}`}
@@ -522,9 +616,9 @@ function EditBubble({ value, onChange, onSave, onCancel, isDark }: {
 
 function SkeletonBubble({ isDark }: { isDark: boolean }) {
   return (
-    <div className="flex gap-4 px-4 py-4 animate-pulse">
-      <div className={`shrink-0 mt-0.5 size-8 rounded-full ${isDark ? "bg-zinc-700" : "bg-zinc-200"}`} />
-      <div className="flex flex-col gap-2 flex-1 max-w-[85%]">
+    <div className="flex gap-2 sm:gap-4 px-2 sm:px-4 py-2 sm:py-4 animate-pulse">
+      <div className={`shrink-0 mt-0.5 size-6 sm:size-8 rounded-full ${isDark ? "bg-zinc-700" : "bg-zinc-200"}`} />
+      <div className="flex flex-col gap-2 flex-1 max-w-[95%] sm:max-w-[85%]">
         <div className={`h-4 w-3/4 rounded-lg ${isDark ? "bg-zinc-700" : "bg-zinc-200"}`} />
         <div className={`h-4 w-1/2 rounded-lg ${isDark ? "bg-zinc-700" : "bg-zinc-200"}`} />
         <div className={`h-4 w-2/3 rounded-lg ${isDark ? "bg-zinc-700" : "bg-zinc-200"}`} />

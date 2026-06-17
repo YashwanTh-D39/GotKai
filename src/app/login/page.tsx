@@ -77,22 +77,22 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex flex-col" style={{ background: bg, color: isDark ? "#e4e4e7" : "#18181b" }}>
-      <nav className={`fixed top-0 left-0 right-0 h-20 flex items-center justify-between px-6 md:px-12 z-50
+      <nav className={`fixed top-0 left-0 right-0 h-16 sm:h-20 flex items-center justify-between px-4 sm:px-6 md:px-12 z-50
         backdrop-blur-xl border-b ${isDark ? "bg-[#05050a]/80 border-white/5" : "bg-[#fafafa]/80 border-black/5"}`}>
-        <a href="/" className="text-xl font-bold tracking-tight bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
+        <a href="/" className="text-lg sm:text-xl font-bold tracking-tight bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
           GotKai
         </a>
-        <div className="flex items-center gap-6">
-          <a href="/" className={`text-sm ${textMuted} hover:opacity-80 transition-opacity`}>Home</a>
+        <div className="flex items-center gap-4 sm:gap-6">
+          <a href="/" className={`text-xs sm:text-sm ${textMuted} hover:opacity-80 transition-opacity`}>Home</a>
           <a href="/chat"
-            className="px-5 py-2 rounded-full bg-gradient-to-r from-indigo-600 to-purple-600 text-sm font-medium
+            className="px-4 sm:px-5 py-1.5 sm:py-2 rounded-full bg-gradient-to-r from-indigo-600 to-purple-600 text-xs sm:text-sm font-medium
               text-white shadow-lg shadow-indigo-600/20 transition-all hover:scale-105 hover:shadow-indigo-600/40">
             Try Chat
           </a>
         </div>
       </nav>
 
-      <main className="flex-1 flex items-center justify-center px-6 py-32 mt-20">
+      <main className="flex-1 flex items-center justify-center px-4 sm:px-6 py-24 sm:py-32 mt-16 sm:mt-20">
         <div className="w-full max-w-[420px]">
           <motion.div
             initial={{ opacity: 0, y: 20 }}

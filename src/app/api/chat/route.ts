@@ -57,51 +57,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
-
-    const stream = new ReadableStream({
-      async start(controller) {
-        const reader = res.body?.getReader();
-        if (!reader) {
-          controller.close();
-          return;
-        }
-
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed === "data: [DONE]") continue;
-            if (!trimmed.startsWith("data: ")) continue;
-
-            try {
-              const json = JSON.parse(trimmed.slice(6));
-              const content = json.choices?.[0]?.delta?.content;
-              if (content) {
-                controller.enqueue(encoder.encode(content));
-              }
-            } catch {
-              // skip malformed chunks
-            }
-          }
-        }
-
-        controller.close();
-      },
-    });
-
-    return new Response(stream, {
+    return new Response(res.body, {
       headers: {
-        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
       },
     });

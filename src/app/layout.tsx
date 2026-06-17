@@ -13,6 +13,11 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+};
+
 export const metadata: Metadata = {
   title: "GotKai - AI Assistant",
   description: "GotKai is a next-generation AI assistant that understands context and helps you ship better work faster.",

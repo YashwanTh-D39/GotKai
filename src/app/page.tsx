@@ -1,8 +1,8 @@
 export default function Home() {
   return (
     <div className="flex flex-col min-h-screen bg-black text-white font-sans">
-      <header className="flex items-center justify-between px-6 py-4 md:px-16 md:py-6">
-        <div className="text-xl font-bold tracking-tight">GotKai</div>
+      <header className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 md:px-16 md:py-6">
+        <div className="text-lg sm:text-xl font-bold tracking-tight">GotKai</div>
         <nav className="hidden md:flex items-center gap-8 text-sm text-zinc-400">
           <a href="#" className="hover:text-white transition-colors">Features</a>
           <a href="#" className="hover:text-white transition-colors">About</a>
@@ -10,7 +10,7 @@ export default function Home() {
         </nav>
         <a
           href="/chat"
-          className="rounded-full bg-white px-5 py-2 text-sm font-medium text-black transition-opacity hover:opacity-90"
+          className="rounded-full bg-white px-4 sm:px-5 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-black transition-opacity hover:opacity-90"
         >
           Get Started
         </a>
@@ -23,14 +23,14 @@ export default function Home() {
             Powered by next-generation AI
           </div>
 
-          <h1 className="text-4xl font-bold leading-tight tracking-tight md:text-6xl lg:text-7xl">
+          <h1 className="text-3xl sm:text-4xl font-bold leading-tight tracking-tight md:text-6xl lg:text-7xl">
             Think Faster with{" "}
             <span className="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 bg-clip-text text-transparent">
               GotKai
             </span>
           </h1>
 
-          <p className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-zinc-400 md:text-lg">
+          <p className="mx-auto mt-4 sm:mt-6 max-w-2xl text-sm sm:text-base leading-relaxed text-zinc-400 md:text-lg">
             The AI assistant that understands context, adapts to your workflow,
             and helps you ship better work — faster. Experience intelligence
             that feels human.

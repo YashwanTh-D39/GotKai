@@ -9,10 +9,10 @@ export default function SettingsPage() {
     <div className={`flex h-screen overflow-hidden ${isDark ? "bg-[#212121]" : "bg-white"}`}
       style={{ color: isDark ? "#e4e4e7" : "#18181b" }}>
       <div className="flex-1 flex flex-col">
-        <header className={`flex items-center justify-between px-4 h-14 shrink-0 border-b ${isDark ? "border-zinc-800/60 bg-[#212121]/80" : "border-zinc-200/80 bg-white/80"}`}>
-          <div className="flex items-center gap-3">
+        <header className={`flex items-center justify-between px-3 sm:px-4 h-12 sm:h-14 shrink-0 border-b ${isDark ? "border-zinc-800/60 bg-[#212121]/80" : "border-zinc-200/80 bg-white/80"}`}>
+          <div className="flex items-center gap-2 sm:gap-3">
             <a href="/chat"
-              className={`size-8 flex items-center justify-center rounded-lg ${isDark ? "text-zinc-400 hover:text-white hover:bg-zinc-800" : "text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100"}`}>
+              className={`size-7 sm:size-8 flex items-center justify-center rounded-lg ${isDark ? "text-zinc-400 hover:text-white hover:bg-zinc-800" : "text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100"}`}>
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5"><path fillRule="evenodd" d="M7.72 12.53a.75.75 0 0 1 0-1.06l7.5-7.5a.75.75 0 1 1 1.06 1.06L9.31 12l6.97 6.97a.75.75 0 1 1-1.06 1.06l-7.5-7.5Z" clipRule="evenodd" /></svg>
             </a>
             <h1 className={`text-sm font-medium ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>Settings</h1>
