@@ -669,7 +669,7 @@ export default function ChatPage() {
 
         {/* History */}
         <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-0.5">
-          {filteredConversations.map((conv) => (
+          {hydrated && filteredConversations.map((conv) => (
             <div key={conv.id} className="group relative">
               {renamingId === conv.id ? (
                 <input ref={renameRef} value={renameValue} onChange={(e) => setRenameValue(e.target.value)}
