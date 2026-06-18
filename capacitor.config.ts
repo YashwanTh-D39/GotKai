@@ -6,8 +6,7 @@ const config: CapacitorConfig = {
   webDir: 'out',
   server: {
     androidScheme: 'https',
-    // After deploying to Vercel, set this to your production URL:
-    // url: 'https://gotkai.vercel.app',
+       url: 'https://got-kai.vercel.app',
   },
 };
 

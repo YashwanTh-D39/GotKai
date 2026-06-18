@@ -7,6 +7,13 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { useConversations, type StoredMessage } from "@/hooks/useConversations";
+import { putFile, type FileRef } from "@/lib/file-store";
+import { validateFile, formatFileSize, isImageType, readFileAsArrayBuffer, readFileAsDataURL, extractFileText, normalizeFileType } from "@/lib/file-utils";
+import { chunkText, indexDocument, searchRelevant, formatContext, removeDocument } from "@/lib/rag";
+import { getMemoryContext, extractWithLLM, addMemoryFact } from "@/lib/memory";
+import { routeUserIntent, getRouteReason, AGENTS, AGENT_LIST } from "@/lib/agents";
+import type { AgentType } from "@/lib/agents";
+import { detectArtifactType, canRenderLive, wrapHtmlPreview, downloadArtifact, type Artifact } from "@/lib/artifacts";
 
 // ── Syntax Theme ────────────────────────────────────
 
@@ -38,24 +45,35 @@ const copyToClipboard = async (text: string) => { try { await navigator.clipboar
 
 // ── Code Block ──────────────────────────────────────
 
-function CodeBlock({ className, children }: { className?: string; children?: React.ReactNode }) {
+function CodeBlock({ className, children, onShowArtifact }: { className?: string; children?: React.ReactNode; onShowArtifact?: (lang: string, code: string) => void }) {
   const [copied, setCopied] = useState(false);
   const isInline = !className;
   const codeString = String(children).replace(/\n$/, "");
   if (isInline) return <code className="rounded-md bg-zinc-700/60 px-1.5 py-0.5 text-sm font-mono text-pink-300">{children}</code>;
   const language = className.replace(/^language-/, "");
+  const isRunnable = ["html", "htm", "svg", "jsx", "tsx", "javascript", "typescript"].includes(language);
   return (
     <div className="mb-4 mt-2 rounded-xl border border-zinc-700/50 overflow-hidden max-w-full">
       <div className="flex items-center justify-between bg-zinc-900 px-3 sm:px-4 py-1.5 border-b border-zinc-700/50">
         <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider truncate">{language}</span>
-        <button onClick={async () => { await copyToClipboard(codeString); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-          className="flex items-center gap-1.5 text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors">
-          {copied ? (
-            <><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5 text-green-400"><path fillRule="evenodd" d="M19.916 4.626a.75.75 0 0 1 .208 1.04l-9 13.5a.75.75 0 0 1-1.154.114l-6-6a.75.75 0 0 1 1.06-1.06l5.353 5.353 8.493-12.74a.75.75 0 0 1 1.04-.207Z" clipRule="evenodd" /></svg> Copied</>
-          ) : (
-            <><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5"><path fillRule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clipRule="evenodd" /><path fillRule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Z" clipRule="evenodd" /></svg> Copy</>
+        <div className="flex items-center gap-1">
+          {onShowArtifact && (
+            <button onClick={() => onShowArtifact(language, codeString)}
+              className="flex items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors px-1.5 py-0.5 rounded hover:bg-zinc-800"
+              title="Open in Artifact">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5"><path d="M21 6.375c0 2.692-4.03 4.875-9 4.875S3 9.067 3 6.375 7.03 1.5 12 1.5s9 2.183 9 4.875Z" /><path d="M12 12.75c2.685 0 5.19-.586 7.078-1.609a8.283 8.283 0 0 0 1.897-1.384c.016.121.025.244.025.368C21 12.817 16.97 15 12 15s-9-2.183-9-4.875c0-.124.009-.247.025-.368a8.285 8.285 0 0 0 1.897 1.384C6.81 12.164 9.315 12.75 12 12.75Z" /><path d="M12 16.5c2.685 0 5.19-.586 7.078-1.609a8.282 8.282 0 0 0 1.897-1.384c.016.121.025.244.025.368 0 2.692-4.03 4.875-9 4.875s-9-2.183-9-4.875c0-.124.009-.247.025-.368a8.284 8.284 0 0 0 1.897 1.384C6.81 15.914 9.315 16.5 12 16.5Z" /><path d="M12 20.25c2.685 0 5.19-.586 7.078-1.609a8.282 8.282 0 0 0 1.897-1.384c.016.121.025.244.025.368 0 2.692-4.03 4.875-9 4.875s-9-2.183-9-4.875c0-.124.009-.247.025-.368a8.284 8.284 0 0 0 1.897 1.384C6.81 19.664 9.315 20.25 12 20.25Z" /></svg>
+              Artifact
+            </button>
           )}
-        </button>
+          <button onClick={async () => { await copyToClipboard(codeString); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+            className="flex items-center gap-1.5 text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors px-1.5 py-0.5 rounded hover:bg-zinc-800">
+            {copied ? (
+              <><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5 text-green-400"><path fillRule="evenodd" d="M19.916 4.626a.75.75 0 0 1 .208 1.04l-9 13.5a.75.75 0 0 1-1.154.114l-6-6a.75.75 0 0 1 1.06-1.06l5.353 5.353 8.493-12.74a.75.75 0 0 1 1.04-.207Z" clipRule="evenodd" /></svg> Copied</>
+            ) : (
+              <><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3.5"><path fillRule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clipRule="evenodd" /><path fillRule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Z" clipRule="evenodd" /></svg> Copy</>
+            )}
+          </button>
+        </div>
       </div>
       <SyntaxHighlighter language={language} style={codeStyle} customStyle={{ margin: 0, borderRadius: 0, background: "#18181b" }}
         showLineNumbers={codeString.split("\n").length > 3}>{codeString}</SyntaxHighlighter>
@@ -63,23 +81,25 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
   );
 }
 
-// ── Markdown Components ─────────────────────────────
+// ── Markdown Components Factory ─────────────────────
 
-const mdComponents = {
-  p: ({ children }: { children?: React.ReactNode }) => <p className="mb-4 last:mb-0 leading-7">{children}</p>,
-  h1: ({ children }: { children?: React.ReactNode }) => <h1 className="text-2xl font-bold mt-6 mb-4 first:mt-0" style={{ color: "var(--foreground)" }}>{children}</h1>,
-  h2: ({ children }: { children?: React.ReactNode }) => <h2 className="text-xl font-semibold mt-5 mb-3 first:mt-0" style={{ color: "var(--foreground)" }}>{children}</h2>,
-  h3: ({ children }: { children?: React.ReactNode }) => <h3 className="text-lg font-semibold mt-4 mb-2 first:mt-0" style={{ color: "var(--foreground)" }}>{children}</h3>,
-  ul: ({ children }: { children?: React.ReactNode }) => <ul className="list-disc pl-6 mb-4 space-y-1.5">{children}</ul>,
-  ol: ({ children }: { children?: React.ReactNode }) => <ol className="list-decimal pl-6 mb-4 space-y-1.5">{children}</ol>,
-  li: ({ children }: { children?: React.ReactNode }) => <li className="leading-7">{children}</li>,
-  code: CodeBlock,
-  pre: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
-  strong: ({ children }: { children?: React.ReactNode }) => <strong className="font-semibold" style={{ color: "var(--foreground)" }}>{children}</strong>,
-  blockquote: ({ children }: { children?: React.ReactNode }) => <blockquote className="border-l-4 border-indigo-500 pl-4 my-4 italic" style={{ color: "var(--muted)" }}>{children}</blockquote>,
-  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => <a href={href} className="text-indigo-400 underline hover:text-indigo-300" target="_blank" rel="noreferrer">{children}</a>,
-  hr: () => <hr className="my-6 border-zinc-700/50" />,
-};
+function createMdComponents(onShowArtifact?: (lang: string, code: string) => void) {
+  return {
+    p: ({ children }: { children?: React.ReactNode }) => <p className="mb-4 last:mb-0 leading-7">{children}</p>,
+    h1: ({ children }: { children?: React.ReactNode }) => <h1 className="text-2xl font-bold mt-6 mb-4 first:mt-0" style={{ color: "var(--foreground)" }}>{children}</h1>,
+    h2: ({ children }: { children?: React.ReactNode }) => <h2 className="text-xl font-semibold mt-5 mb-3 first:mt-0" style={{ color: "var(--foreground)" }}>{children}</h2>,
+    h3: ({ children }: { children?: React.ReactNode }) => <h3 className="text-lg font-semibold mt-4 mb-2 first:mt-0" style={{ color: "var(--foreground)" }}>{children}</h3>,
+    ul: ({ children }: { children?: React.ReactNode }) => <ul className="list-disc pl-6 mb-4 space-y-1.5">{children}</ul>,
+    ol: ({ children }: { children?: React.ReactNode }) => <ol className="list-decimal pl-6 mb-4 space-y-1.5">{children}</ol>,
+    li: ({ children }: { children?: React.ReactNode }) => <li className="leading-7">{children}</li>,
+    code: (props: { className?: string; children?: React.ReactNode }) => <CodeBlock {...props} onShowArtifact={onShowArtifact} />,
+    pre: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
+    strong: ({ children }: { children?: React.ReactNode }) => <strong className="font-semibold" style={{ color: "var(--foreground)" }}>{children}</strong>,
+    blockquote: ({ children }: { children?: React.ReactNode }) => <blockquote className="border-l-4 border-indigo-500 pl-4 my-4 italic" style={{ color: "var(--muted)" }}>{children}</blockquote>,
+    a: ({ href, children }: { href?: string; children?: React.ReactNode }) => <a href={href} className="text-indigo-400 underline hover:text-indigo-300" target="_blank" rel="noreferrer">{children}</a>,
+    hr: () => <hr className="my-6 border-zinc-700/50" />,
+  };
+}
 
 // ─── Main Component ─────────────────────────────────
 
@@ -100,6 +120,19 @@ export default function ChatPage() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
+  // File upload state
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [fileErrors, setFileErrors] = useState<string[]>([]);
+  const [imagePreviews, setImagePreviews] = useState<Record<string, string>>({});
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Knowledge hub state
+  const [fetchUrl, setFetchUrl] = useState("");
+  const [fetchOpen, setFetchOpen] = useState(false);
+  const [fetching, setFetching] = useState(false);
+  const fetchInputRef = useRef<HTMLInputElement>(null);
+
   // Streaming latency optimizations
   const [streamingContent, setStreamingContent] = useState("");
   const streamingContentRef = useRef("");
@@ -113,6 +146,23 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const renameRef = useRef<HTMLInputElement>(null);
+
+  // Agent system
+  const [currentAgent, setCurrentAgent] = useState<AgentType>("reasoning");
+  const [agentOverride, setAgentOverride] = useState<AgentType | null>(null);
+  const [agentSelectorOpen, setAgentSelectorOpen] = useState(false);
+
+  // Artifact system
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [activeArtifact, setActiveArtifact] = useState<Artifact | null>(null);
+  const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
+
+  // Voice input
+  const [isRecording, setIsRecording] = useState(false);
+  const recognitionRef = useRef<any>(null);
+
+  // Learning / feedback
+  const [feedbackMap, setFeedbackMap] = useState<Record<string, "up" | "down">>({});
 
   // Derive local messages from active conversation
   const storedMessages: StoredMessage[] = activeConversation?.messages ?? [];
@@ -173,7 +223,7 @@ export default function ChatPage() {
   // Chat logic
   const handleStop = useCallback(() => { abortRef.current?.abort(); abortRef.current = null; setIsLoading(false); }, []);
 
-  const streamChat = useCallback(async (history: { role: string; content: string }[], overrideConvId?: string) => {
+  const streamChat = useCallback(async (history: { role: string; content: string }[], overrideConvId?: string, hiddenContext?: string) => {
     const id = overrideConvId ?? activeConversation?.id;
     if (!id) return;
     const controller = new AbortController();
@@ -187,6 +237,11 @@ export default function ChatPage() {
 
     const tempMsg: StoredMessage = { id: aiId, role: "assistant", content: "", timestamp: now() };
     setMessages((prev) => [...prev, tempMsg], id);
+
+    // Prepend hidden context as a system message (not visible to user)
+    const fullHistory = hiddenContext
+      ? [{ role: "system" as const, content: hiddenContext }, ...history]
+      : history;
 
     const parseSSE = (chunk: string, buffer: string): { text: string; rest: string } => {
       buffer += chunk;
@@ -208,13 +263,21 @@ export default function ChatPage() {
 
     try {
       const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+      // Only send agent to server when user explicitly overrode it (for server-side LLM routing)
+      const finalAgent = agentOverride ?? undefined;
       const res = await fetch(`${apiBase}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history }),
+        body: JSON.stringify({ messages: fullHistory, ...(finalAgent ? { agent: finalAgent } : {}) }),
         signal: controller.signal,
       });
       if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || `Request failed (${res.status})`); }
+
+      // Update agent from server-side LLM routing (more accurate than regex)
+      const serverAgent = res.headers.get("X-Agent") as AgentType | null;
+      if (serverAgent && !agentOverride) {
+        setCurrentAgent(serverAgent);
+      }
 
       const reader = res.body?.getReader();
       if (!reader) throw new Error("No response body");
@@ -264,9 +327,9 @@ export default function ChatPage() {
     }
   }, [activeConversation, setMessages]);
 
-  const handleSend = useCallback((text?: string) => {
+  const handleSend = useCallback(async (text?: string) => {
     const content = (text ?? input).trim();
-    if (!content || isLoading) return;
+    if ((!content && pendingFiles.length === 0) || isLoading) return;
     setInput("");
 
     // Create conversation if none active
@@ -274,39 +337,105 @@ export default function ChatPage() {
     if (!convId) {
       const conv = createConversation("");
       convId = conv.id;
-      renameConversation(conv.id, content.split(" ").slice(0, 6).join(" ").substring(0, 50));
+      renameConversation(conv.id, (content || pendingFiles[0]?.name || "File upload").split(" ").slice(0, 6).join(" ").substring(0, 50));
     }
 
     // Generate title from first user message
     if (activeConversation?.messages.length === 0) {
-      const title = content.replace(/[^\w\s]/g, "").trim().split(/\s+/).slice(0, 6).join(" ") + (content.trim().split(/\s+/).length > 6 ? "..." : "");
+      const titleSource = content || pendingFiles[0]?.name || "File upload";
+      const title = titleSource.replace(/[^\w\s]/g, "").trim().split(/\s+/).slice(0, 6).join(" ") + (titleSource.trim().split(/\s+/).length > 6 ? "..." : "");
       renameConversation(convId, title);
     }
 
-    const userMsg: StoredMessage = { id: crypto.randomUUID(), role: "user", content, timestamp: now() };
+    // Store pending files in IndexedDB + build file refs + index for RAG
+    const fileRefs: FileRef[] = [];
+    for (const f of pendingFiles) {
+      try {
+        const id = crypto.randomUUID();
+        const type = normalizeFileType(f);
+        const buffer = await readFileAsArrayBuffer(f);
+        await putFile({
+          id, name: f.name, size: f.size, type,
+          data: buffer, conversationId: convId, createdAt: Date.now(),
+        });
+        fileRefs.push({ id, name: f.name, size: f.size, type });
+
+          if (!isImageType(type)) {
+            const extracted = await extractFileText(type, buffer);
+            if (extracted.trim()) {
+              const chunks = chunkText(extracted, id, f.name, "file");
+              await indexDocument(chunks, { sourceType: "file" });
+            }
+          }
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : "Unknown error";
+        console.warn("File processing error:", reason);
+      }
+    }
+    setPendingFiles([]);
+    setImagePreviews({});
+
+    // Retrieve relevant RAG context for the user's query
+    const ragContext = await searchRelevant(content);
+    const ragContextBlock = formatContext(ragContext);
+
+    // Retrieve persistent memory
+    const memoryBlock = getMemoryContext();
+
+    // Build hidden context block (sent to AI, not visible to user)
+    const hiddenContext = [ragContextBlock, memoryBlock].filter(Boolean).join("\n") || undefined;
+
+    // User message: only their text + file names (no raw document dumps)
+    const fileSummary = fileRefs.length > 0
+      ? `\n\n[Attached files: ${fileRefs.map((r) => r.name).join(", ")}]`
+      : "";
+    const visibleContent = `${content}${fileSummary}`;
+
+    const userMsg: StoredMessage = {
+      id: crypto.randomUUID(), role: "user", content: visibleContent,
+      files: fileRefs.length > 0 ? fileRefs : undefined,
+      timestamp: now(),
+    };
     const currentMsgs = activeConversation?.messages ?? [];
     const updated = [...currentMsgs, userMsg];
     updateMessages(convId, updated);
-    streamChat(updated.map(({ role, content }) => ({ role, content })), convId);
-  }, [input, isLoading, activeConversation, createConversation, renameConversation, updateMessages, streamChat]);
 
-  const handleRegenerate = useCallback(() => {
+    // Extract memory from conversation (fire-and-forget, don't block chat)
+    extractWithLLM(updated.map(({ role, content }) => ({ role, content }))).catch(() => {});
+
+    // Auto-detect agent from user message
+    const detectedAgent = agentOverride ?? routeUserIntent(content);
+    setCurrentAgent(detectedAgent);
+
+    streamChat(updated.map(({ role, content }) => ({ role, content })), convId, hiddenContext);
+  }, [input, isLoading, activeConversation, createConversation, renameConversation, updateMessages, streamChat, pendingFiles]);
+
+  const handleRegenerate = useCallback(async () => {
     const idx = messages.length - 1 - [...messages].reverse().findIndex((m) => m.role === "assistant");
     if (idx < 0) return;
     const msgs = messages.slice(0, idx);
     setMessages(msgs);
-    streamChat(msgs.map(({ role, content }) => ({ role, content })));
+    const lastUser = [...msgs].reverse().find((m) => m.role === "user");
+    const ragContext = await searchRelevant(lastUser?.content || "");
+    const ragBlock = formatContext(ragContext);
+    const memoryBlock = getMemoryContext();
+    const hidden = [ragBlock, memoryBlock].filter(Boolean).join("\n") || undefined;
+    streamChat(msgs.map(({ role, content }) => ({ role, content })), undefined, hidden);
   }, [messages, setMessages, streamChat]);
 
   const handleEditStart = (msg: StoredMessage) => { if (msg.role !== "user") return; setEditingId(msg.id); setEditValue(msg.content); };
-  const handleEditSave = () => {
+  const handleEditSave = async () => {
     if (!editingId || !editValue.trim()) return;
     const idx = messages.findIndex((m) => m.id === editingId);
     if (idx === -1) return;
     const edited = { ...messages[idx], content: editValue.trim(), timestamp: now() };
     const updated = [...messages.slice(0, idx), edited];
     setMessages(updated); setEditingId(null); setEditValue("");
-    streamChat(updated.map(({ role, content }) => ({ role, content })));
+    const ragContext = await searchRelevant(editValue.trim());
+    const ragBlock = formatContext(ragContext);
+    const memoryBlock = getMemoryContext();
+    const hidden = [ragBlock, memoryBlock].filter(Boolean).join("\n") || undefined;
+    streamChat(updated.map(({ role, content }) => ({ role, content })), undefined, hidden);
   };
   const handleEditCancel = () => { setEditingId(null); setEditValue(""); };
 
@@ -319,6 +448,181 @@ export default function ChatPage() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } };
+
+  // ── File Upload Handlers ──────────────────────────
+
+  const processFiles = useCallback(async (files: FileList | File[]) => {
+    const arr = Array.from(files);
+    const valid: File[] = [];
+    const errs: string[] = [];
+    for (const f of arr) {
+      const err = validateFile(f);
+      if (err) { errs.push(`${f.name}: ${err}`); continue; }
+      try { normalizeFileType(f); } catch { errs.push(`${f.name}: Unable to determine file type`); continue; }
+      valid.push(f);
+    }
+    if (errs.length > 0) setFileErrors(errs);
+    if (valid.length === 0) return;
+    setPendingFiles((prev) => [...prev, ...valid]);
+    const previews: Record<string, string> = {};
+    for (const f of valid) {
+      if (isImageType(f.type)) {
+        previews[`${f.name}_${f.size}`] = await readFileAsDataURL(f);
+      }
+    }
+    setImagePreviews((prev) => ({ ...prev, ...previews }));
+  }, []);
+
+  const removePendingFile = useCallback((index: number) => {
+    setPendingFiles((prev) => {
+      const f = prev[index];
+      if (f && isImageType(f.type)) {
+        setImagePreviews((p) => { const n = { ...p }; delete n[`${f.name}_${f.size}`]; return n; });
+      }
+      return prev.filter((_, i) => i !== index);
+    });
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDragOver(true); }, []);
+  const handleDragLeave = useCallback((e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDragOver(false); }, []);
+  const handleDrop = useCallback((e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDragOver(false); if (e.dataTransfer.files.length > 0) processFiles(e.dataTransfer.files); }, [processFiles]);
+
+  const handleAttachClick = useCallback(() => { fileInputRef.current?.click(); }, []);
+
+  // ── Knowledge Hub: URL Fetch ─────────────────────
+
+  const handleFetchUrl = useCallback(async () => {
+    const url = fetchUrl.trim();
+    if (!url || fetching) return;
+    setFetching(true);
+    try {
+      const type = url.includes("youtube.com") || url.includes("youtu.be") ? "youtube" : "webpage";
+      const res = await fetch("/api/fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, type }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setFileErrors([err.error || `Failed to fetch ${url}`]);
+        return;
+      }
+      const data = await res.json();
+      if (data.content && data.content.length > 100) {
+        const id = crypto.randomUUID();
+        const chunks = chunkText(data.content, id, data.title || url, data.sourceType || type, url);
+        await indexDocument(chunks, { sourceType: data.sourceType || type, sourceUrl: url });
+        setFileErrors([`✅ Indexed: "${(data.title || url).substring(0, 60)}" (${chunks.length} chunks)`]);
+        setFetchUrl("");
+        setFetchOpen(false);
+      } else {
+        setFileErrors([`⚠️ "${(data.title || url).substring(0, 60)}" returned insufficient content.`]);
+      }
+    } catch (err) {
+      setFileErrors([`Failed to fetch: ${err instanceof Error ? err.message : "Unknown error"}`]);
+    } finally {
+      setFetching(false);
+    }
+  }, [fetchUrl, fetching]);
+
+  // Auto-focus URL input when opened
+  useEffect(() => {
+    if (fetchOpen && fetchInputRef.current) {
+      fetchInputRef.current.focus();
+    }
+  }, [fetchOpen]);
+
+  const clearFileErrors = useCallback(() => setFileErrors([]), []);
+
+  // ── Voice Input ─────────────────────────────────
+
+  const startRecording = useCallback(() => {
+    const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognitionAPI) { setFileErrors(["Voice input is not supported in this browser."]); return; }
+    const recognition = new SpeechRecognitionAPI();
+    recognition.lang = "en-US";
+    recognition.interimResults = true;
+    recognition.continuous = true;
+    recognitionRef.current = recognition;
+    setIsRecording(true);
+    recognition.onresult = (event: any) => {
+      const results: { transcript: string }[][] = event.results;
+      const transcript = results
+        .map((r) => r[0].transcript)
+        .join("");
+      setInput(transcript);
+    };
+    recognition.onerror = () => { setIsRecording(false); };
+    recognition.onend = () => { setIsRecording(false); };
+    recognition.start();
+  }, [setFileErrors]);
+
+  const stopRecording = useCallback(() => {
+    recognitionRef.current?.stop();
+    recognitionRef.current = null;
+    setIsRecording(false);
+  }, []);
+
+  // ── Learning / Feedback ──────────────────────────
+
+  const handleFeedback = useCallback((msgId: string, type: "up" | "down") => {
+    setFeedbackMap((prev) => ({ ...prev, [msgId]: type }));
+    // Find the corresponding user message for context
+    const msgIndex = storedMessages.findIndex((m) => m.id === msgId);
+    const userMsg = msgIndex > 0 ? storedMessages[msgIndex - 1] : null;
+    const feedbackEntry = { messageId: msgId, type, userMessage: userMsg?.content?.substring(0, 200), timestamp: Date.now() };
+
+    // Persist to localStorage
+    try {
+      const key = "gotkai_feedback";
+      const raw = localStorage.getItem(key);
+      const data = raw ? JSON.parse(raw) : {};
+      data[msgId] = feedbackEntry;
+      localStorage.setItem(key, JSON.stringify(data));
+
+      // Downvotes -> add learning signal to memory
+      if (type === "down" && userMsg?.content) {
+        addMemoryFact(
+          `User disagreed with my response about "${userMsg.content.substring(0, 100)}". I should verify information more carefully on this topic.`,
+          "correction",
+          "feedback",
+        );
+      }
+    } catch {}
+  }, [storedMessages]);
+
+  // ── Text-to-Speech ──────────────────────────────
+
+  const handleTTS = useCallback((text: string) => {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    try {
+      const voices = window.speechSynthesis.getVoices();
+      const preferred = voices.find((v) => v.lang.startsWith("en") && v.name.includes("Natural"));
+      if (preferred) utterance.voice = preferred;
+    } catch {}
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  // ── Artifact Handlers ─────────────────────────────
+
+  const addArtifact = useCallback((language: string, content: string) => {
+    const type = detectArtifactType(language, content);
+    const artifact: Artifact = {
+      id: crypto.randomUUID(),
+      type,
+      title: `Code (${language})`,
+      content,
+      language,
+      createdAt: Date.now(),
+    };
+    setArtifacts((prev) => [artifact, ...prev]);
+    setActiveArtifact(artifact);
+    setArtifactPanelOpen(true);
+  }, []);
 
   const filteredConversations = conversations.filter((c) =>
     c.title.toLowerCase().includes(searchQuery.toLowerCase()),
@@ -424,8 +728,123 @@ export default function ChatPage() {
         </div>
       </aside>
 
+      {/* ── Artifact Panel ──────────────────────── */}
+      <AnimatePresence>
+        {artifactPanelOpen && activeArtifact && (
+          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 480, opacity: 1 }} exit={{ width: 0, opacity: 0 }}
+            transition={{ duration: 0.25, ease: "easeInOut" }}
+            className={`flex-shrink-0 overflow-hidden border-l z-30 ${isDark ? "bg-[#1a1a1a] border-zinc-800/60" : "bg-white border-zinc-200/80"}`}>
+            <div className="flex flex-col h-full w-[480px]">
+              {/* Artifact header */}
+              <div className={`flex items-center justify-between px-4 h-12 shrink-0 border-b ${isDark ? "border-zinc-800/60" : "border-zinc-200/80"}`}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4 text-indigo-400 shrink-0"><path d="M21 6.375c0 2.692-4.03 4.875-9 4.875S3 9.067 3 6.375 7.03 1.5 12 1.5s9 2.183 9 4.875Z" /><path d="M12 12.75c2.685 0 5.19-.586 7.078-1.609a8.283 8.283 0 0 0 1.897-1.384c.016.121.025.244.025.368C21 12.817 16.97 15 12 15s-9-2.183-9-4.875c0-.124.009-.247.025-.368a8.285 8.285 0 0 0 1.897 1.384C6.81 12.164 9.315 12.75 12 12.75Z" /><path d="M12 16.5c2.685 0 5.19-.586 7.078-1.609a8.282 8.282 0 0 0 1.897-1.384c.016.121.025.244.025.368 0 2.692-4.03 4.875-9 4.875s-9-2.183-9-4.875c0-.124.009-.247.025-.368a8.284 8.284 0 0 0 1.897 1.384C6.81 15.914 9.315 16.5 12 16.5Z" /><path d="M12 20.25c2.685 0 5.19-.586 7.078-1.609a8.282 8.282 0 0 0 1.897-1.384c.016.121.025.244.025.368 0 2.692-4.03 4.875-9 4.875s-9-2.183-9-4.875c0-.124.009-.247.025-.368a8.284 8.284 0 0 0 1.897 1.384C6.81 19.664 9.315 20.25 12 20.25Z" /></svg>
+                  <span className={`text-sm font-medium truncate ${isDark ? "text-zinc-200" : "text-zinc-800"}`}>
+                    {activeArtifact.title}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => downloadArtifact(activeArtifact)}
+                    className={`size-7 flex items-center justify-center rounded-md ${isDark ? "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800" : "text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100"}`}
+                    title="Download">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4"><path d="M12 1.5a.75.75 0 0 1 .75.75V7.5h-1.5V2.25A.75.75 0 0 1 12 1.5ZM11.25 7.5v5.69l-1.72-1.72a.75.75 0 0 0-1.06 1.06l3 3a.75.75 0 0 0 1.06 0l3-3a.75.75 0 1 0-1.06-1.06l-1.72 1.72V7.5h1.5v4.19l1.22-1.22a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.22 1.22V7.5h1.5Z" /><path d="M3 11.25a.75.75 0 0 1 .75.75v6A2.25 2.25 0 0 0 6 20.25h12A2.25 2.25 0 0 0 20.25 18v-6a.75.75 0 0 1 1.5 0v6A3.75 3.75 0 0 1 18 21.75H6A3.75 3.75 0 0 1 2.25 18v-6a.75.75 0 0 1 .75-.75Z" /></svg>
+                  </button>
+                  <button onClick={() => setArtifactPanelOpen(false)}
+                    className={`size-7 flex items-center justify-center rounded-md ${isDark ? "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800" : "text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100"}`}>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4"><path fillRule="evenodd" d="M5.47 5.47a.75.75 0 0 1 1.06 0L12 10.94l5.47-5.47a.75.75 0 1 1 1.06 1.06L13.06 12l5.47 5.47a.75.75 0 1 1-1.06 1.06L12 13.06l-5.47 5.47a.75.75 0 0 1-1.06-1.06L10.94 12 5.47 6.53a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" /></svg>
+                  </button>
+                </div>
+              </div>
+              {/* Artifact content */}
+              <div className="flex-1 overflow-y-auto">
+                {canRenderLive(activeArtifact) ? (
+                  <iframe
+                    srcDoc={activeArtifact.type === "html" ? wrapHtmlPreview(activeArtifact.content) : activeArtifact.content}
+                    className="w-full h-full border-0"
+                    title={activeArtifact.title}
+                    sandbox="allow-scripts allow-same-origin"
+                  />
+                ) : (
+                  <SyntaxHighlighter language={activeArtifact.language} style={codeStyle}
+                    customStyle={{ margin: 0, borderRadius: 0, background: "#18181b", minHeight: "100%", padding: "1rem" }}
+                    showLineNumbers>{activeArtifact.content}</SyntaxHighlighter>
+                )}
+              </div>
+              {/* Artifact history */}
+              {artifacts.length > 1 && (
+                <div className={`border-t shrink-0 ${isDark ? "border-zinc-800/60" : "border-zinc-200/80"}`}>
+                  <div className="px-3 py-2">
+                    <div className={`text-[11px] font-medium mb-1.5 ${isDark ? "text-zinc-500" : "text-zinc-400"}`}>Recent Artifacts</div>
+                    <div className="flex gap-1.5 overflow-x-auto">
+                      {artifacts.slice(0, 10).map((a) => (
+                        <button key={a.id} onClick={() => setActiveArtifact(a)}
+                          className={`shrink-0 flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] transition-all
+                            ${activeArtifact.id === a.id
+                              ? isDark ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-800"
+                              : isDark ? "bg-zinc-800/50 text-zinc-500 hover:bg-zinc-700/50 hover:text-zinc-300" : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700"}`}>
+                          <span>{a.type === "html" ? "🌐" : a.type === "svg" ? "🎨" : "📄"}</span>
+                          <span className="max-w-[80px] truncate">{a.language}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* ── Main Area ───────────────────────────── */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 relative"
+        onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+
+        {/* Drop Zone Overlay */}
+        <AnimatePresenceWrapper show={dragOver}>
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}
+            className="absolute inset-0 z-50 flex items-center justify-center rounded-2xl border-2 border-dashed border-indigo-500/60 bg-indigo-500/10 backdrop-blur-sm"
+            onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+            <div className="flex flex-col items-center gap-3 px-8">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-10 text-indigo-400">
+                <path fillRule="evenodd" d="M10.5 3.75a6 6 0 0 0-5.98 6.496A5.25 5.25 0 0 0 6.75 20.5H18a4.5 4.5 0 0 0 2.206-8.423 3.75 3.75 0 0 0-4.133-4.303A6.001 6.001 0 0 0 10.5 3.75Zm2.03 5.47a.75.75 0 0 0-1.06 0l-3 3a.75.75 0 1 0 1.06 1.06l1.72-1.72v4.94a.75.75 0 0 0 1.5 0v-4.94l1.72 1.72a.75.75 0 1 0 1.06-1.06l-3-3Z" clipRule="evenodd" />
+              </svg>
+              <p className="text-base font-medium text-indigo-300">Drop files here</p>
+              <p className="text-sm text-zinc-500">PDF, DOCX, TXT, JPG, PNG, WEBP &middot; Max 20MB</p>
+            </div>
+          </motion.div>
+        </AnimatePresenceWrapper>
+
+        {/* File error toasts */}
+        <AnimatePresence>
+          {fileErrors.length > 0 && (
+            <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
+              className="absolute top-2 right-2 z-50 flex flex-col gap-1 max-w-sm">
+              {fileErrors.map((err, i) => (
+                <div key={i} className={`flex items-start gap-2 rounded-xl px-3 py-2 text-xs shadow-lg ${isDark ? "bg-red-900/80 text-red-200 border border-red-700/50" : "bg-red-50 text-red-700 border border-red-200"}`}>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4 shrink-0 mt-0.5 text-red-400"><path fillRule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25Zm-1.72 6.97a.75.75 0 1 0-1.06 1.06L10.94 12l-1.72 1.72a.75.75 0 1 0 1.06 1.06L12 13.06l1.72 1.72a.75.75 0 1 0 1.06-1.06L13.06 12l1.72-1.72a.75.75 0 1 0-1.06-1.06L12 10.94l-1.72-1.72Z" clipRule="evenodd" /></svg>
+                  <span className="flex-1">{err}</span>
+                  <button onClick={clearFileErrors} className="text-red-300 hover:text-red-100">&times;</button>
+                </div>
+              ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Floating Artifact Button */}
+        {artifacts.length > 0 && !artifactPanelOpen && (
+          <button onClick={() => { setActiveArtifact(artifacts[0]); setArtifactPanelOpen(true); }}
+            className={`absolute bottom-20 right-4 z-30 flex items-center gap-2 rounded-full px-3 py-2 text-xs font-medium shadow-lg transition-all hover:scale-105
+              ${isDark ? "bg-indigo-600 text-white hover:bg-indigo-500" : "bg-indigo-600 text-white hover:bg-indigo-500"}`}>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4"><path d="M21 6.375c0 2.692-4.03 4.875-9 4.875S3 9.067 3 6.375 7.03 1.5 12 1.5s9 2.183 9 4.875Z" /><path d="M12 12.75c2.685 0 5.19-.586 7.078-1.609a8.283 8.283 0 0 0 1.897-1.384c.016.121.025.244.025.368C21 12.817 16.97 15 12 15s-9-2.183-9-4.875c0-.124.009-.247.025-.368a8.285 8.285 0 0 0 1.897 1.384C6.81 12.164 9.315 12.75 12 12.75Z" /><path d="M12 16.5c2.685 0 5.19-.586 7.078-1.609a8.282 8.282 0 0 0 1.897-1.384c.016.121.025.244.025.368 0 2.692-4.03 4.875-9 4.875s-9-2.183-9-4.875c0-.124.009-.247.025-.368a8.284 8.284 0 0 0 1.897 1.384C6.81 15.914 9.315 16.5 12 16.5Z" /><path d="M12 20.25c2.685 0 5.19-.586 7.078-1.609a8.282 8.282 0 0 0 1.897-1.384c.016.121.025.244.025.368 0 2.692-4.03 4.875-9 4.875s-9-2.183-9-4.875c0-.124.009-.247.025-.368a8.284 8.284 0 0 0 1.897 1.384C6.81 19.664 9.315 20.25 12 20.25Z" /></svg>
+            {artifacts.length} Artifact{artifacts.length > 1 ? "s" : ""}
+          </button>
+        )}
+
+        {/* Hidden file input */}
+        <input ref={fileInputRef} type="file" multiple accept=".pdf,.docx,.txt,.js,.ts,.jsx,.tsx,.css,.html,.md,.csv,.json,.xml,.py,.java,.c,.cpp,.rs,.go,.rb,.php,.sh,.yaml,.yml,.jpg,.jpeg,.png,.webp"
+          onChange={(e) => { if (e.target.files?.length) { processFiles(e.target.files); e.target.value = ""; } }}
+          className="hidden" />
+
         {/* Header */}
         <header className={`flex items-center justify-between px-3 sm:px-4 h-12 sm:h-14 shrink-0 border-b ${isDark ? "border-zinc-800/60 bg-[#212121]/80 backdrop-blur-xl" : "border-zinc-200/80 bg-white/80 backdrop-blur-xl"}`}>
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
@@ -436,6 +855,48 @@ export default function ChatPage() {
             <span className={`text-sm font-medium truncate ${isDark ? "text-zinc-400" : "text-zinc-500"}`}>
               {activeConversation?.title ? activeConversation.title.substring(0, 30) : "New Chat"}
             </span>
+            {/* Agent Badge */}
+            <div className="relative">
+              <button onClick={() => setAgentSelectorOpen((v) => !v)}
+                className={`flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium transition-all
+                  ${isDark ? "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200" : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700"}`}>
+                <span>{AGENTS[currentAgent].emoji}</span>
+                <span>{AGENTS[currentAgent].label}</span>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3"><path fillRule="evenodd" d="M12.53 16.28a.75.75 0 0 1-1.06 0l-7.5-7.5a.75.75 0 0 1 1.06-1.06L12 14.69l6.97-6.97a.75.75 0 1 1 1.06 1.06l-7.5 7.5Z" clipRule="evenodd" /></svg>
+              </button>
+              <AnimatePresence>
+                {agentSelectorOpen && (
+                  <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}
+                    className={`absolute top-full right-0 mt-1 w-48 rounded-xl border shadow-xl z-50 overflow-hidden
+                      ${isDark ? "bg-[#27272a] border-zinc-700/50" : "bg-white border-zinc-200/80"}`}>
+                    {AGENT_LIST.map((a) => (
+                      <button key={a.id} onClick={() => { setCurrentAgent(a.id); setAgentOverride(a.id); setAgentSelectorOpen(false); }}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 text-xs text-left transition-all
+                          ${currentAgent === a.id
+                            ? isDark ? "bg-zinc-700/60 text-zinc-200" : "bg-zinc-100 text-zinc-800"
+                            : isDark ? "text-zinc-400 hover:bg-zinc-700/40 hover:text-zinc-200" : "text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700"}`}>
+                        <span className="text-base">{a.emoji}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium">{a.label}</div>
+                          <div className={`text-[10px] truncate ${isDark ? "text-zinc-500" : "text-zinc-400"}`}>{a.description}</div>
+                        </div>
+                        {currentAgent === a.id && (
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4 text-indigo-400"><path fillRule="evenodd" d="M19.916 4.626a.75.75 0 0 1 .208 1.04l-9 13.5a.75.75 0 0 1-1.154.114l-6-6a.75.75 0 0 1 1.06-1.06l5.353 5.353 8.493-12.74a.75.75 0 0 1 1.04-.207Z" clipRule="evenodd" /></svg>
+                        )}
+                      </button>
+                    ))}
+                    {agentOverride && (
+                      <div className={`border-t px-3 py-2 ${isDark ? "border-zinc-700/50" : "border-zinc-200/80"}`}>
+                        <button onClick={() => { setAgentOverride(null); setAgentSelectorOpen(false); }}
+                          className={`text-[11px] ${isDark ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-400 hover:text-zinc-600"}`}>
+                          ↻ Auto-detect
+                        </button>
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
           {isLoading && (
             <button onClick={handleStop} className="flex items-center gap-1.5 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-400 transition-all hover:bg-red-500/20">
@@ -462,7 +923,11 @@ export default function ChatPage() {
                       <ChatBubble message={msg} isDark={isDark} hydrated={hydrated}
                         isStreaming={isLoading && i === messages.length - 1 && msg.role === "assistant" && msg.content === ""}
                         onEdit={() => handleEditStart(msg)}
-                        onRegenerate={msg.role === "assistant" && i === messages.length - 1 && !isLoading ? handleRegenerate : undefined} />
+                        onRegenerate={msg.role === "assistant" && i === messages.length - 1 && !isLoading ? handleRegenerate : undefined}
+                        onFeedback={msg.role === "assistant" ? handleFeedback : undefined}
+                        onTTS={msg.role === "assistant" ? handleTTS : undefined}
+                        agent={msg.role === "assistant" ? AGENTS[currentAgent] : undefined}
+                        onShowArtifact={addArtifact} />
                     )}
                   </motion.div>
                 ))}
@@ -493,23 +958,81 @@ export default function ChatPage() {
         <div className={`border-t shrink-0 ${isDark ? "border-zinc-800/60" : "border-zinc-200/80"}`}>
           <div className={`px-3 sm:px-4 py-3 sm:py-4 ${isDark ? "bg-[#212121]" : "bg-white"}`}>
             <div className="mx-auto max-w-[850px]">
-              <div className={`relative flex items-end gap-1.5 sm:gap-2 rounded-2xl border px-3 sm:px-4 py-2.5 sm:py-3 transition-all
-                ${isDark ? "border-zinc-700/50 bg-[#2a2a2a] focus-within:border-zinc-500" : "border-zinc-200/80 bg-zinc-50 focus-within:border-zinc-300"}`}>
-                <button className={`shrink-0 flex items-center justify-center size-8 rounded-xl transition-colors ${isDark ? "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800" : "text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200"}`} title="Attach file">
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5"><path fillRule="evenodd" d="M18.97 3.659a2.25 2.25 0 0 0-3.182 0l-10.94 10.94a3.75 3.75 0 1 0 5.304 5.303l7.693-7.693a.75.75 0 0 1 1.06 1.06l-7.693 7.693a5.25 5.25 0 1 1-7.424-7.424l10.939-10.94a3.75 3.75 0 1 1 5.303 5.304L9.097 16.835a2.25 2.25 0 0 1-3.182-3.182l8.485-8.486a.75.75 0 0 1 1.06 1.06L8.977 14.815a.75.75 0 0 0 1.06 1.06l8.934-8.934a2.25 2.25 0 0 0 0-3.182Z" clipRule="evenodd" /></svg>
-                </button>
-                <textarea ref={textareaRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
-                  placeholder={activeConversation ? "Send a message..." : "Start a new chat..."} rows={1} style={{ minHeight: 24, maxHeight: 160 }}
-                  className={`flex-1 resize-none bg-transparent px-1 py-0.5 text-sm outline-none ${isDark ? "text-white placeholder-zinc-500" : "text-zinc-900 placeholder-zinc-400"}`} />
-                <button className={`shrink-0 flex items-center justify-center size-8 rounded-xl transition-colors ${isDark ? "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800" : "text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200"}`} title="Voice input">
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5"><path d="M8.25 4.5a3.75 3.75 0 1 1 7.5 0v8.25a3.75 3.75 0 1 1-7.5 0V4.5Z" /><path d="M6 10.5a.75.75 0 0 1 .75.75v1.5a5.25 5.25 0 1 0 10.5 0v-1.5a.75.75 0 0 1 1.5 0v1.5a6.751 6.751 0 0 1-6 6.709v2.291h3a.75.75 0 0 1 0 1.5h-8.25a.75.75 0 0 1 0-1.5h3.75v-2.291a6.751 6.751 0 0 1-6-6.709v-1.5A.75.75 0 0 1 6 10.5Z" /></svg>
-                </button>
-                <motion.button onClick={() => handleSend()} disabled={!input.trim() || isLoading}
-                  whileHover={input.trim() && !isLoading ? { scale: 1.05 } : {}}
-                  whileTap={input.trim() && !isLoading ? { scale: 0.95 } : {}}
-                  className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-lg shadow-blue-600/20 transition-all hover:shadow-blue-600/40 disabled:opacity-30 disabled:cursor-not-allowed">
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4"><path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" /></svg>
-                </motion.button>
+              <div className={`rounded-2xl border transition-all ${isDark ? "border-zinc-700/50 bg-[#2a2a2a] focus-within:border-zinc-500" : "border-zinc-200/80 bg-zinc-50 focus-within:border-zinc-300"}`}>
+                <div className="flex items-end gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3">
+                  <div className="relative">
+                    <button onClick={() => { setFetchOpen((v) => !v); setFetchUrl(""); }}
+                      className={`shrink-0 flex items-center justify-center size-8 rounded-xl transition-colors ${isDark ? "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800" : "text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200"}`} title="Fetch URL">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" /><path fillRule="evenodd" d="M1.323 11.447C2.811 6.976 7.028 3.75 12.001 3.75c4.97 0 9.185 3.223 10.675 7.69.12.362.12.752 0 1.113-1.487 4.471-5.705 7.697-10.677 7.697-4.97 0-9.186-3.223-10.675-7.69a1.762 1.762 0 0 1 0-1.113ZM17.25 12a5.25 5.25 0 1 1-10.5 0 5.25 5.25 0 0 1 10.5 0Z" clipRule="evenodd" /></svg>
+                    </button>
+                    <AnimatePresence>
+                      {fetchOpen && (
+                        <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}
+                          className={`absolute bottom-full left-0 mb-2 w-80 rounded-xl border shadow-xl z-50 overflow-hidden ${isDark ? "bg-[#27272a] border-zinc-700/50" : "bg-white border-zinc-200/80"}`}>
+                          <div className="p-3">
+                            <p className={`text-xs font-medium mb-2 ${isDark ? "text-zinc-400" : "text-zinc-500"}`}>Add knowledge source</p>
+                            <input ref={fetchInputRef} value={fetchUrl} onChange={(e) => setFetchUrl(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleFetchUrl(); } }}
+                              placeholder="Paste a URL (web page or YouTube)..."
+                              className={`w-full rounded-lg px-3 py-2 text-sm outline-none border ${isDark ? "bg-zinc-800 text-zinc-200 border-zinc-700 placeholder-zinc-500" : "bg-zinc-50 text-zinc-800 border-zinc-300 placeholder-zinc-400"}`} />
+                            <div className="flex items-center justify-end gap-2 mt-2">
+                              <button onClick={() => setFetchOpen(false)}
+                                className={`text-xs px-2 py-1 rounded ${isDark ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-400 hover:text-zinc-600"}`}>Cancel</button>
+                              <button onClick={handleFetchUrl} disabled={!fetchUrl.trim() || fetching}
+                                className="text-xs px-3 py-1 rounded font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40">
+                                {fetching ? "Fetching..." : "Fetch & Index"}
+                              </button>
+                            </div>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                  <button onClick={handleAttachClick} className={`shrink-0 flex items-center justify-center size-8 rounded-xl transition-colors ${isDark ? "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800" : "text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200"}`} title="Attach file">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5"><path fillRule="evenodd" d="M18.97 3.659a2.25 2.25 0 0 0-3.182 0l-10.94 10.94a3.75 3.75 0 1 0 5.304 5.303l7.693-7.693a.75.75 0 0 1 1.06 1.06l-7.693 7.693a5.25 5.25 0 1 1-7.424-7.424l10.939-10.94a3.75 3.75 0 1 1 5.303 5.304L9.097 16.835a2.25 2.25 0 0 1-3.182-3.182l8.485-8.486a.75.75 0 0 1 1.06 1.06L8.977 14.815a.75.75 0 0 0 1.06 1.06l8.934-8.934a2.25 2.25 0 0 0 0-3.182Z" clipRule="evenodd" /></svg>
+                  </button>
+                  <textarea ref={textareaRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
+                    placeholder={activeConversation ? "Send a message..." : "Start a new chat..."} rows={1} style={{ minHeight: 24, maxHeight: 160 }}
+                    className={`flex-1 resize-none bg-transparent px-1 py-0.5 text-sm outline-none ${isDark ? "text-white placeholder-zinc-500" : "text-zinc-900 placeholder-zinc-400"}`} />
+                  <button onClick={isRecording ? stopRecording : startRecording}
+                    className={`shrink-0 flex items-center justify-center size-8 rounded-xl transition-colors ${isRecording ? "text-red-400 bg-red-500/10 animate-pulse" : isDark ? "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800" : "text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200"}`} title={isRecording ? "Stop recording" : "Voice input"}>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5"><path d="M8.25 4.5a3.75 3.75 0 1 1 7.5 0v8.25a3.75 3.75 0 1 1-7.5 0V4.5Z" /><path d="M6 10.5a.75.75 0 0 1 .75.75v1.5a5.25 5.25 0 1 0 10.5 0v-1.5a.75.75 0 0 1 1.5 0v1.5a6.751 6.751 0 0 1-6 6.709v2.291h3a.75.75 0 0 1 0 1.5h-8.25a.75.75 0 0 1 0-1.5h3.75v-2.291a6.751 6.751 0 0 1-6-6.709v-1.5A.75.75 0 0 1 6 10.5Z" /></svg>
+                  </button>
+                  <motion.button onClick={() => handleSend()} disabled={(!input.trim() && pendingFiles.length === 0) || isLoading}
+                    whileHover={(input.trim() || pendingFiles.length > 0) && !isLoading ? { scale: 1.05 } : {}}
+                    whileTap={(input.trim() || pendingFiles.length > 0) && !isLoading ? { scale: 0.95 } : {}}
+                    className={`flex size-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-lg shadow-blue-600/20 transition-all hover:shadow-blue-600/40 disabled:opacity-30 disabled:cursor-not-allowed`}>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4"><path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" /></svg>
+                  </motion.button>
+                </div>
+                {/* File chips */}
+                {pendingFiles.length > 0 && (
+                  <div className={`flex flex-wrap gap-2 px-3 sm:px-4 pb-2.5 sm:pb-3 ${isDark ? "border-t border-zinc-700/50" : "border-t border-zinc-200/80"}`}
+                    style={{ paddingTop: "0.5rem" }}>
+                    {pendingFiles.map((f, i) => {
+                      const preview = imagePreviews[`${f.name}_${f.size}`];
+                      return (
+                        <div key={`${f.name}_${f.size}_${i}`}
+                          className={`flex items-center gap-2 rounded-xl px-3 py-1.5 text-xs transition-all group/chip ${isDark ? "bg-zinc-800/80 border border-zinc-700/50" : "bg-white border border-zinc-200/80 shadow-sm"}`}>
+                          {preview ? (
+                            <img src={preview} alt="" className="size-6 rounded object-cover shrink-0" />
+                          ) : (
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5 shrink-0 text-zinc-500">
+                              <path d="M5.625 1.5c-1.036 0-1.875.84-1.875 1.875v17.25c0 1.035.84 1.875 1.875 1.875h12.75c1.035 0 1.875-.84 1.875-1.875V12.75A3.75 3.75 0 0 0 16.5 9h-1.875a1.875 1.875 0 0 1-1.875-1.875V5.25A3.75 3.75 0 0 0 9 1.5H5.625Z" />
+                              <path d="M12.971 1.816A5.23 5.23 0 0 1 14.25 5.25v1.875c0 .207.168.375.375.375h1.875a5.23 5.23 0 0 1 3.434 1.279 9.768 9.768 0 0 0-6.963-6.963Z" />
+                            </svg>
+                          )}
+                          <span className={`max-w-[120px] sm:max-w-[160px] truncate ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>{f.name}</span>
+                          <span className="text-zinc-500 shrink-0">{formatFileSize(f.size)}</span>
+                          <button onClick={() => removePendingFile(i)}
+                            className={`size-4 flex items-center justify-center rounded-full transition-colors ${isDark ? "text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700" : "text-zinc-400 hover:text-zinc-700 hover:bg-zinc-200"}`}>
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-3"><path fillRule="evenodd" d="M5.47 5.47a.75.75 0 0 1 1.06 0L12 10.94l5.47-5.47a.75.75 0 1 1 1.06 1.06L13.06 12l5.47 5.47a.75.75 0 1 1-1.06 1.06L12 13.06l-5.47 5.47a.75.75 0 0 1-1.06-1.06L10.94 12 5.47 6.53a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" /></svg>
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
               <p className={`mt-2 text-center text-[10px] sm:text-[11px] leading-tight ${isDark ? "text-zinc-600" : "text-zinc-400"}`}>GotKai can make mistakes. Verify important information.</p>
             </div>
@@ -534,8 +1057,10 @@ function EmptyState() {
   );
 }
 
-const ChatBubble = memo(function ChatBubble({ message, isDark, hydrated, isStreaming, onEdit, onRegenerate }: {
+const ChatBubble = memo(function ChatBubble({ message, isDark, hydrated, isStreaming, onEdit, onRegenerate, onFeedback, onTTS, agent, onShowArtifact }: {
   message: StoredMessage; isDark: boolean; hydrated: boolean; isStreaming: boolean; onEdit?: () => void; onRegenerate?: () => void;
+  onFeedback?: (id: string, type: "up" | "down") => void; onTTS?: (text: string) => void; agent?: { emoji: string; label: string };
+  onShowArtifact?: (lang: string, code: string) => void;
 }) {
   const isUser = message.role === "user";
   return (
@@ -546,7 +1071,16 @@ const ChatBubble = memo(function ChatBubble({ message, isDark, hydrated, isStrea
       <div className={`flex flex-col min-w-0 ${isUser ? "items-end" : "items-start"}`}>
         <div className={`rounded-2xl px-3 sm:px-4 py-2 sm:py-3 text-sm leading-relaxed md:text-base max-w-[95%] sm:max-w-[90%] md:max-w-[85%] ${isUser ? "bg-gradient-to-br from-indigo-600 to-purple-700 text-white rounded-tr-md" : isDark ? "bg-[#2f2f2f] border border-zinc-700/30" : "bg-white border border-zinc-200/80 shadow-sm rounded-tl-md"}`}>
           {isUser ? (
-            <p className="whitespace-pre-wrap">{message.content}</p>
+            <>
+              {message.files && message.files.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {message.files.map((f) => (
+                    <FileAttachment key={f.id} file={f} isDark={isDark} isUser={isUser} />
+                  ))}
+                </div>
+              )}
+              <p className="whitespace-pre-wrap">{message.content}</p>
+            </>
           ) : isStreaming && !message.content ? (
             <span className="inline-flex gap-1 py-1">
               <span className="size-2 rounded-full bg-zinc-500 animate-bounce" style={{ animationDelay: "0ms" }} />
@@ -554,12 +1088,42 @@ const ChatBubble = memo(function ChatBubble({ message, isDark, hydrated, isStrea
               <span className="size-2 rounded-full bg-zinc-500 animate-bounce" style={{ animationDelay: "300ms" }} />
             </span>
           ) : (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{message.content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={createMdComponents(onShowArtifact)}>{message.content}</ReactMarkdown>
           )}
         </div>
         <div className={`flex items-center gap-1 mt-1 px-1 opacity-0 group-hover:opacity-100 transition-opacity flex-wrap ${isUser ? "flex-row-reverse" : ""}`}>
           {hydrated && message.timestamp && (
             <span className={`text-[11px] ${isDark ? "text-zinc-600" : "text-zinc-400"}`}>{formatDate(message.timestamp)}</span>
+          )}
+          {/* Agent badge for assistant messages */}
+          {!isUser && agent && (
+            <span className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${isDark ? "bg-zinc-800 text-zinc-500" : "bg-zinc-100 text-zinc-500"}`}
+              title={agent.label}>
+              {agent.emoji}
+            </span>
+          )}
+          {/* Feedback thumbs for assistant */}
+          {!isUser && onFeedback && (
+            <>
+              <button onClick={() => onFeedback(message.id, "up")}
+                className="flex size-7 sm:size-6 items-center justify-center rounded-md text-zinc-500 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all active:scale-90"
+                title="Good response">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4 sm:size-3.5"><path d="M7.493 18.5c-.425 0-.82-.236-.975-.632A7.5 7.5 0 0 1 6 15.125c0-1.75.599-3.358 1.602-4.634.151-.192.373-.309.6-.397.473-.183.89-.514 1.212-.924a9.042 9.042 0 0 1 2.861-2.4c.723-.384 1.35-.956 1.653-1.715a4.498 4.498 0 0 0 .322-1.672V2.75A.75.75 0 0 1 15 2a2.25 2.25 0 0 1 2.25 2.25c0 1.152-.26 2.243-.723 3.218-.266.558.107 1.282.725 1.282m0 0h3.126c1.026 0 1.945.694 2.054 1.715.045.422.068.85.068 1.285a11.95 11.95 0 0 1-2.649 7.521c-.388.482-.987.729-1.605.729H14.23c-.483 0-.964-.078-1.423-.23l-3.114-1.04a4.501 4.501 0 0 0-1.423-.23h-.777Z" clipRule="evenodd" /></svg>
+              </button>
+              <button onClick={() => onFeedback(message.id, "down")}
+                className="flex size-7 sm:size-6 items-center justify-center rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-all active:scale-90"
+                title="Bad response">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4 sm:size-3.5"><path d="M7.493 5.5c-.425 0-.82.236-.975.632A7.5 7.5 0 0 0 6 8.875c0 1.75.599 3.358 1.602 4.634.151.192.373.309.6.397.473.183.89.514 1.212.924a9.042 9.042 0 0 0 2.861 2.4c.723.384 1.35.956 1.653 1.715a4.498 4.498 0 0 1 .322 1.672v.633A.75.75 0 0 0 15 22a2.25 2.25 0 0 0 2.25-2.25c0-1.152-.26-2.243-.723-3.218-.266-.558.107-1.282.725-1.282h3.126c1.026 0 1.945-.694 2.054-1.715.045-.422.068-.85.068-1.285a11.95 11.95 0 0 0-2.649-7.521c-.388-.482-.987-.729-1.605-.729H14.23c-.483 0-.964.078-1.423.23l-3.114 1.04a4.501 4.501 0 0 1-1.423.23h-.777Z" clipRule="evenodd" /></svg>
+              </button>
+            </>
+          )}
+          {/* TTS for assistant */}
+          {!isUser && onTTS && (
+            <button onClick={() => onTTS(message.content)}
+              className="flex size-7 sm:size-6 items-center justify-center rounded-md text-zinc-500 hover:text-sky-400 hover:bg-sky-500/10 transition-all active:scale-90"
+              title="Read aloud">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-4 sm:size-3.5"><path d="M11.553 3.064A.75.75 0 0 1 12 3.75v16.5a.75.75 0 0 1-1.255.555L5.46 16H2.75A.75.75 0 0 1 2 15.25v-6.5A.75.75 0 0 1 2.75 8H5.46l5.285-4.805a.75.75 0 0 1 .808-.131ZM16.47 8.47a.75.75 0 0 1 1.06 0A5.25 5.25 0 0 1 18.75 12a5.25 5.25 0 0 1-1.22 3.53.75.75 0 0 1-1.06-1.06A3.75 3.75 0 0 0 17.25 12a3.75 3.75 0 0 0-1.22-2.47.75.75 0 0 1 0-1.06Zm3.47-2.94a.75.75 0 0 1 1.06 0A8.25 8.25 0 0 1 22.5 12a8.25 8.25 0 0 1-2.47 4.47.75.75 0 1 1-1.06-1.06A6.75 6.75 0 0 0 21 12a6.75 6.75 0 0 0-2.03-3.41.75.75 0 0 1 0-1.06Z" /></svg>
+            </button>
           )}
           <CopyMessageButton text={message.content} />
           {isUser && onEdit && (
@@ -625,6 +1189,62 @@ function SkeletonBubble({ isDark }: { isDark: boolean }) {
       </div>
     </div>
   );
+}
+
+// ── File Attachment Display ─────────────────────────
+
+function FileAttachment({ file, isDark, isUser }: { file: FileRef; isDark: boolean; isUser: boolean }) {
+  const [preview, setPreview] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!isImageType(file.type)) return;
+    getFilePreview(file.id).then(setPreview);
+  }, [file.id, file.type]);
+
+  if (isImageType(file.type) && preview) {
+    return (
+      <>
+        <button onClick={() => setExpanded(!expanded)}
+          className={`shrink-0 rounded-lg overflow-hidden border-2 transition-all hover:opacity-90 ${isUser ? "border-white/20" : "border-zinc-700/30"}`}>
+          <img src={preview} alt={file.name} className="size-16 sm:size-20 object-cover" />
+        </button>
+        <AnimatePresence>
+          {expanded && (
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => setExpanded(false)}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 cursor-pointer">
+              <motion.img initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9 }}
+                src={preview} alt={file.name} className="max-h-[85vh] max-w-[90vw] rounded-xl object-contain" />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </>
+    );
+  }
+
+  return (
+    <div className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs ${isUser ? "bg-white/10" : isDark ? "bg-zinc-800/60" : "bg-zinc-100"}`}>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5 shrink-0 text-zinc-500">
+        <path d="M5.625 1.5c-1.036 0-1.875.84-1.875 1.875v17.25c0 1.035.84 1.875 1.875 1.875h12.75c1.035 0 1.875-.84 1.875-1.875V12.75A3.75 3.75 0 0 0 16.5 9h-1.875a1.875 1.875 0 0 1-1.875-1.875V5.25A3.75 3.75 0 0 0 9 1.5H5.625Z" />
+        <path d="M12.971 1.816A5.23 5.23 0 0 1 14.25 5.25v1.875c0 .207.168.375.375.375h1.875a5.23 5.23 0 0 1 3.434 1.279 9.768 9.768 0 0 0-6.963-6.963Z" />
+      </svg>
+      <span className={`max-w-[140px] truncate ${isUser ? "text-white/90" : isDark ? "text-zinc-300" : "text-zinc-700"}`}>{file.name}</span>
+      <span className={isUser ? "text-white/60" : "text-zinc-500"}>{formatFileSize(file.size)}</span>
+    </div>
+  );
+}
+
+async function getFilePreview(fileId: string): Promise<string | null> {
+  try {
+    const { getFile } = await import("@/lib/file-store");
+    const stored = await getFile(fileId);
+    if (!stored) return null;
+    const blob = new Blob([stored.data], { type: stored.type });
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
 }
 
 // ── AnimatePresence wrapper ─────────────────────────

@@ -1,0 +1,19 @@
+{
+  "name": "GotKai AI",
+  "short_name": "GotKai",
+  "description": "An intelligent AI assistant that understands context, adapts to your workflow, and helps you ship better work faster.",
+  "start_url": "/chat",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#212121",
+  "theme_color": "#212121",
+  "categories": ["productivity", "utilities", "artificial-intelligence"],
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "48x48",
+      "type": "image/x-icon"
+    }
+  ]
+}

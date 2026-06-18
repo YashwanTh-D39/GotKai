@@ -1,10 +1,13 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 
+import type { FileRef } from "@/lib/file-store";
+
 export type StoredMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
   timestamp: number;
+  files?: FileRef[];
 };
 
 export type StoredConversation = {
