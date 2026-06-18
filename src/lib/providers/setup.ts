@@ -1,6 +1,7 @@
 import { registerProvider } from "./index";
 import { createNvidiaProvider } from "./nvidia";
 import { createOllamaProvider } from "./ollama";
+import { createGroqProvider } from "./groq";
 
 let initialized = false;
 
@@ -11,5 +12,6 @@ export function initProviders(): void {
   // Order matters: tried first to last
   // Local Ollama is tried first (zero cost, private, offline-capable)
   registerProvider(createOllamaProvider());
+  registerProvider(createGroqProvider());
   registerProvider(createNvidiaProvider());
 }
