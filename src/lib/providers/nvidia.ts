@@ -1,6 +1,7 @@
 import type { LLMProvider, ProviderMessage, ProviderConfig } from ".";
 
 export const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+const FETCH_TIMEOUT = 30000;
 
 export function createNvidiaProvider(): LLMProvider {
   return {
@@ -29,6 +30,12 @@ export function createNvidiaProvider(): LLMProvider {
         stream: config.stream !== false,
       };
 
+      // Combine user signal with a timeout so the request doesn't hang forever
+      const timeoutSignal = AbortSignal.timeout(FETCH_TIMEOUT);
+      const combinedSignal = signal
+        ? AbortSignal.any([signal, timeoutSignal])
+        : timeoutSignal;
+
       return fetch(NVIDIA_URL, {
         method: "POST",
         headers: {
@@ -36,7 +43,7 @@ export function createNvidiaProvider(): LLMProvider {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
-        signal,
+        signal: combinedSignal,
       });
     },
   };

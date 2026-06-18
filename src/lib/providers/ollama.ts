@@ -1,6 +1,7 @@
 import type { LLMProvider, ProviderMessage, ProviderConfig } from ".";
 
 const DEFAULT_OLLAMA_URL = "http://localhost:11434";
+const FETCH_TIMEOUT = 30000;
 
 export type OllamaConfig = {
   baseUrl?: string;
@@ -41,11 +42,13 @@ export function createOllamaProvider(config?: OllamaConfig): LLMProvider {
       };
 
       // Ollama chat API returns NDJSON when streaming
+      const timeoutSignal = AbortSignal.timeout(FETCH_TIMEOUT);
+      const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
       const res = await fetch(`${baseUrl}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        signal,
+        signal: combinedSignal,
       });
 
       if (!res.ok) return res;

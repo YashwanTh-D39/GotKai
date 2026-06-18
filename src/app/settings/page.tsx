@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useTheme } from "@/lib/theme-context";
 import {
   getMemoriesByCategory,
@@ -13,6 +13,18 @@ import {
   type MemoryFact,
   type MemoryCategory,
 } from "@/lib/memory";
+import {
+  VOICE_PROFILES,
+  getVoiceProfile,
+  loadVoiceSettings,
+  saveVoiceSettings,
+  speak,
+  stopSpeech,
+  ensureVoices,
+  PITCH_MIN, PITCH_MAX, PITCH_STEP,
+  RATE_MIN, RATE_MAX, RATE_STEP,
+  type VoiceSettings,
+} from "@/lib/voice";
 
 const CATEGORIES: { key: MemoryCategory | "all"; label: string; color: string }[] = [
   { key: "all", label: "All", color: "" },
@@ -45,7 +57,7 @@ function formatRelative(ts: number): string {
 
 export default function SettingsPage() {
   const { isDark, toggleTheme } = useTheme();
-  const [tab, setTab] = useState<"appearance" | "memory">("memory");
+  const [tab, setTab] = useState<"appearance" | "memory" | "voice">("memory");
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<MemoryCategory | "all">("all");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -55,6 +67,18 @@ export default function SettingsPage() {
   const [stats, setStats] = useState({ total: 0, byCategory: {} as Record<string, number>, avgConfidence: 0 });
   const [memories, setMemories] = useState<MemoryFact[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
+
+  // Voice settings
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(loadVoiceSettings);
+  const [previewingId, setPreviewingId] = useState<string | null>(null);
+  const voicesInitialized = useRef(false);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && !voicesInitialized.current) {
+      voicesInitialized.current = true;
+      ensureVoices().catch(() => {});
+    }
+  }, []);
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
@@ -97,6 +121,28 @@ export default function SettingsPage() {
 
   const filteredMemories = useMemo(() => memories, [memories]);
 
+  const updateVoice = useCallback((partial: Partial<VoiceSettings>) => {
+    setVoiceSettings((prev) => {
+      const next = { ...prev, ...partial };
+      saveVoiceSettings(next);
+      return next;
+    });
+  }, []);
+
+  const handlePreviewVoice = useCallback((voiceId: string) => {
+    if (previewingId === voiceId) {
+      stopSpeech();
+      setPreviewingId(null);
+      return;
+    }
+    setPreviewingId(voiceId);
+    const profile = getVoiceProfile(voiceId);
+    if (profile) {
+      speak("Hello! I'm GotKai, your AI assistant. How can I help you today?", profile, voiceSettings);
+      setTimeout(() => setPreviewingId(null), 3000);
+    }
+  }, [previewingId, voiceSettings]);
+
   return (
     <div className={`flex h-screen overflow-hidden ${isDark ? "bg-[#212121]" : "bg-white"}`}
       style={{ color: isDark ? "#e4e4e7" : "#18181b" }}>
@@ -126,6 +172,13 @@ export default function SettingsPage() {
                 ? isDark ? "text-white border-indigo-400" : "text-zinc-900 border-indigo-600"
                 : isDark ? "text-zinc-500 border-transparent hover:text-zinc-300" : "text-zinc-400 border-transparent hover:text-zinc-600"}`}>
             Appearance
+          </button>
+          <button onClick={() => setTab("voice")}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors
+              ${tab === "voice"
+                ? isDark ? "text-white border-indigo-400" : "text-zinc-900 border-indigo-600"
+                : isDark ? "text-zinc-500 border-transparent hover:text-zinc-300" : "text-zinc-400 border-transparent hover:text-zinc-600"}`}>
+            Voice
           </button>
         </div>
 
@@ -300,6 +353,98 @@ export default function SettingsPage() {
                       <span className={`text-sm ${isDark ? "text-zinc-500" : "text-zinc-400"}`}>1.0.0</span>
                     </div>
                   </div>
+                </div>
+              </>
+            )}
+
+            {/* ── Voice Tab ──────────────────────────── */}
+            {tab === "voice" && (
+              <>
+                <h2 className={`text-base font-semibold mb-1 ${isDark ? "text-zinc-200" : "text-zinc-800"}`}>Voice</h2>
+                <p className={`text-sm mb-6 ${isDark ? "text-zinc-500" : "text-zinc-400"}`}>Choose a voice and customize how GotKai speaks.</p>
+
+                {/* Voice profile cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-2 gap-2 mb-6">
+                  {VOICE_PROFILES.map((v) => (
+                    <button key={v.id} onClick={() => updateVoice({ activeVoiceId: v.id })}
+                      className={`rounded-xl border p-3 text-left transition-all ${
+                        voiceSettings.activeVoiceId === v.id
+                          ? isDark ? "border-indigo-500 bg-indigo-500/10" : "border-indigo-500 bg-indigo-50"
+                          : isDark ? "border-zinc-800/60 bg-[#1a1a1a] hover:border-zinc-700/50" : "border-zinc-200/80 bg-zinc-50 hover:border-zinc-300"
+                      }`}>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-lg">{v.emoji}</span>
+                        <button onClick={(e) => { e.stopPropagation(); handlePreviewVoice(v.id); }}
+                          className={`text-xs px-2 py-0.5 rounded-lg transition-colors ${
+                            previewingId === v.id
+                              ? "bg-indigo-600 text-white"
+                              : isDark ? "bg-zinc-800 text-zinc-400 hover:text-zinc-200" : "bg-zinc-200 text-zinc-500 hover:text-zinc-700"
+                          }`}>
+                          {previewingId === v.id ? "Playing..." : "Preview"}
+                        </button>
+                      </div>
+                      <div className={`text-sm font-medium ${isDark ? "text-zinc-200" : "text-zinc-800"}`}>{v.name}</div>
+                      <div className={`text-[11px] mt-0.5 leading-relaxed ${isDark ? "text-zinc-500" : "text-zinc-400"}`}>{v.description}</div>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Pitch slider */}
+                <div className={`rounded-xl border p-4 mb-3 ${isDark ? "border-zinc-800/60 bg-[#1a1a1a]" : "border-zinc-200/80 bg-zinc-50"}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`text-sm font-medium ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>Pitch</span>
+                    <span className={`text-xs font-mono ${isDark ? "text-zinc-500" : "text-zinc-400"}`}>{voiceSettings.pitch.toFixed(1)}</span>
+                  </div>
+                  <input type="range" min={PITCH_MIN} max={PITCH_MAX} step={PITCH_STEP} value={voiceSettings.pitch}
+                    onChange={(e) => updateVoice({ pitch: parseFloat(e.target.value) })}
+                    className="w-full accent-indigo-500" />
+                  <div className="flex justify-between text-[10px] mt-1">
+                    <span className={isDark ? "text-zinc-600" : "text-zinc-400"}>Low</span>
+                    <span className={isDark ? "text-zinc-600" : "text-zinc-400"}>High</span>
+                  </div>
+                </div>
+
+                {/* Rate slider */}
+                <div className={`rounded-xl border p-4 mb-6 ${isDark ? "border-zinc-800/60 bg-[#1a1a1a]" : "border-zinc-200/80 bg-zinc-50"}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`text-sm font-medium ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>Speed</span>
+                    <span className={`text-xs font-mono ${isDark ? "text-zinc-500" : "text-zinc-400"}`}>{voiceSettings.rate.toFixed(1)}</span>
+                  </div>
+                  <input type="range" min={RATE_MIN} max={RATE_MAX} step={RATE_STEP} value={voiceSettings.rate}
+                    onChange={(e) => updateVoice({ rate: parseFloat(e.target.value) })}
+                    className="w-full accent-indigo-500" />
+                  <div className="flex justify-between text-[10px] mt-1">
+                    <span className={isDark ? "text-zinc-600" : "text-zinc-400"}>Slow</span>
+                    <span className={isDark ? "text-zinc-600" : "text-zinc-400"}>Fast</span>
+                  </div>
+                </div>
+
+                {/* Toggles */}
+                <div className={`rounded-xl border divide-y ${isDark ? "border-zinc-800/60 bg-[#1a1a1a] divide-zinc-800/60" : "border-zinc-200/80 bg-zinc-50 divide-zinc-200/80"}`}>
+                  <label className="flex items-center justify-between px-4 py-3.5 cursor-pointer">
+                    <span className={`text-sm ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>Auto-read responses</span>
+                    <input type="checkbox" checked={voiceSettings.autoTTS}
+                      onChange={(e) => updateVoice({ autoTTS: e.target.checked })}
+                      className="size-4 accent-indigo-500 rounded" />
+                  </label>
+                  <label className="flex items-center justify-between px-4 py-3.5 cursor-pointer">
+                    <span className={`text-sm ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>Continuous voice conversation</span>
+                    <input type="checkbox" checked={voiceSettings.continuousMode}
+                      onChange={(e) => updateVoice({ continuousMode: e.target.checked })}
+                      className="size-4 accent-indigo-500 rounded" />
+                  </label>
+                  <label className="flex items-center justify-between px-4 py-3.5 cursor-pointer">
+                    <span className={`text-sm ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>Voice input enabled</span>
+                    <input type="checkbox" checked={voiceSettings.voiceInputEnabled}
+                      onChange={(e) => updateVoice({ voiceInputEnabled: e.target.checked })}
+                      className="size-4 accent-indigo-500 rounded" />
+                  </label>
+                  <label className="flex items-center justify-between px-4 py-3.5 cursor-pointer">
+                    <span className={`text-sm ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>Expressive speech</span>
+                    <input type="checkbox" checked={voiceSettings.emotionEnabled}
+                      onChange={(e) => updateVoice({ emotionEnabled: e.target.checked })}
+                      className="size-4 accent-indigo-500 rounded" />
+                  </label>
                 </div>
               </>
             )}

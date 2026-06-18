@@ -14,59 +14,15 @@ function getModelConfig(agent: AgentType) {
   };
 }
 
-const ROUTING_PROMPT = `Classify the user's intent in one word:
-- "reasoning" for analysis, explanation, math, logic, or general questions
-- "code" for programming, debugging, code review, or technical implementation
-- "research" for fact-finding, definitions, comparisons, or deep investigation
-- "writing" for creative writing, editing, content creation, or communication
-
-Respond with ONLY the single word.`;
-
-async function classifyIntent(
-  message: string,
-  signal?: AbortSignal,
-): Promise<AgentType | null> {
-  try {
-    initProviders();
-    const { response: res } = await chatWithFallback(
-      [
-        { role: "system", content: ROUTING_PROMPT },
-        { role: "user", content: message.slice(0, 500) },
-      ],
-      {
-        model: "meta/llama-3.1-70b-instruct",
-        temperature: 0.05,
-        top_p: 0.9,
-        max_tokens: 20,
-        stream: false,
-      },
-      signal,
-    );
-    const data = await res.json();
-    const text = (data.choices?.[0]?.message?.content || "").trim().toLowerCase();
-    if (["reasoning", "code", "research", "writing"].includes(text)) {
-      return text as AgentType;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 export async function POST(req: NextRequest) {
   try {
     const { messages, agent: agentParam } = await req.json();
 
-    // Determine agent: explicit override, LLM-based routing, or default
-    let agent: AgentType;
-    if (agentParam && ["reasoning", "code", "research", "writing"].includes(agentParam)) {
-      agent = agentParam;
-    } else {
-      // Use the last user message for routing
-      const lastUserMsg = [...messages].reverse().find((m: { role: string }) => m.role === "user");
-      const classified = lastUserMsg ? await classifyIntent(lastUserMsg.content) : null;
-      agent = classified ?? "reasoning";
-    }
+    // Use the agent provided by the client (regex-based routing) or default to reasoning
+    const agent: AgentType =
+      agentParam && ["reasoning", "code", "research", "writing"].includes(agentParam)
+        ? agentParam
+        : "reasoning";
 
     const systemPrompt = {
       role: "system" as const,

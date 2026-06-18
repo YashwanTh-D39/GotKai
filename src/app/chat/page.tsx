@@ -14,6 +14,8 @@ import { getMemoryContext, extractWithLLM, addMemoryFact } from "@/lib/memory";
 import { routeUserIntent, getRouteReason, AGENTS, AGENT_LIST } from "@/lib/agents";
 import type { AgentType } from "@/lib/agents";
 import { detectArtifactType, canRenderLive, wrapHtmlPreview, downloadArtifact, type Artifact } from "@/lib/artifacts";
+import { speakLong, stopSpeech, isSpeaking, ensureVoices, createSTTEngine, loadVoiceSettings, saveVoiceSettings, VOICE_PROFILES, getVoiceProfile } from "@/lib/voice";
+import type { VoiceSettings } from "@/lib/voice";
 
 // ── Syntax Theme ────────────────────────────────────
 
@@ -159,7 +161,9 @@ export default function ChatPage() {
 
   // Voice input
   const [isRecording, setIsRecording] = useState(false);
-  const recognitionRef = useRef<any>(null);
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(loadVoiceSettings);
+  const voiceSettingsRef = useRef(voiceSettings);
+  const sttEngineRef = useRef<ReturnType<typeof createSTTEngine> | null>(null);
 
   // Learning / feedback
   const [feedbackMap, setFeedbackMap] = useState<Record<string, "up" | "down">>({});
@@ -216,6 +220,7 @@ export default function ChatPage() {
     if (editingId && editRef.current) { editRef.current.focus(); editRef.current.style.height = "auto"; editRef.current.style.height = `${Math.min(editRef.current.scrollHeight, 200)}px`; }
   }, [editingId]);
   useEffect(() => { setHydrated(true); }, []);
+  useEffect(() => { voiceSettingsRef.current = voiceSettings; }, [voiceSettings]);
   useEffect(() => {
     if (renamingId && renameRef.current) { renameRef.current.focus(); renameRef.current.select(); }
   }, [renamingId]);
@@ -223,7 +228,7 @@ export default function ChatPage() {
   // Chat logic
   const handleStop = useCallback(() => { abortRef.current?.abort(); abortRef.current = null; setIsLoading(false); }, []);
 
-  const streamChat = useCallback(async (history: { role: string; content: string }[], overrideConvId?: string, hiddenContext?: string) => {
+  const streamChat = useCallback(async (history: { role: string; content: string }[], overrideConvId?: string, hiddenContext?: string, detectedAgent?: AgentType) => {
     const id = overrideConvId ?? activeConversation?.id;
     if (!id) return;
     const controller = new AbortController();
@@ -263,17 +268,17 @@ export default function ChatPage() {
 
     try {
       const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
-      // Only send agent to server when user explicitly overrode it (for server-side LLM routing)
-      const finalAgent = agentOverride ?? undefined;
+      // Send the detected agent to the server (from regex routing, or user override)
+      const finalAgent = agentOverride ?? detectedAgent ?? "reasoning";
       const res = await fetch(`${apiBase}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: fullHistory, ...(finalAgent ? { agent: finalAgent } : {}) }),
+        body: JSON.stringify({ messages: fullHistory, agent: finalAgent }),
         signal: controller.signal,
       });
       if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || `Request failed (${res.status})`); }
 
-      // Update agent from server-side LLM routing (more accurate than regex)
+      // Read agent from server response header (server echoes it back)
       const serverAgent = res.headers.get("X-Agent") as AgentType | null;
       if (serverAgent && !agentOverride) {
         setCurrentAgent(serverAgent);
@@ -309,6 +314,13 @@ export default function ChatPage() {
       streamingIdRef.current = null;
       setStreamingContent("");
       setMessages((prev) => prev.map((m) => m.id === aiId ? { ...m, content: acc } : m), id);
+
+      // Auto-speak if enabled
+      const vs = voiceSettingsRef.current;
+      if (vs.autoTTS && acc.trim()) {
+        const profile = getVoiceProfile(vs.activeVoiceId) || VOICE_PROFILES[0];
+        ensureVoices().then(() => { speakLong(acc, profile, { pitch: vs.pitch, rate: vs.rate }); });
+      }
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === "AbortError") {
         const partial = streamingContentRef.current;
@@ -407,7 +419,7 @@ export default function ChatPage() {
     const detectedAgent = agentOverride ?? routeUserIntent(content);
     setCurrentAgent(detectedAgent);
 
-    streamChat(updated.map(({ role, content }) => ({ role, content })), convId, hiddenContext);
+    streamChat(updated.map(({ role, content }) => ({ role, content })), convId, hiddenContext, detectedAgent);
   }, [input, isLoading, activeConversation, createConversation, renameConversation, updateMessages, streamChat, pendingFiles]);
 
   const handleRegenerate = useCallback(async () => {
@@ -420,8 +432,9 @@ export default function ChatPage() {
     const ragBlock = formatContext(ragContext);
     const memoryBlock = getMemoryContext();
     const hidden = [ragBlock, memoryBlock].filter(Boolean).join("\n") || undefined;
-    streamChat(msgs.map(({ role, content }) => ({ role, content })), undefined, hidden);
-  }, [messages, setMessages, streamChat]);
+    const detectedAgent = agentOverride ?? routeUserIntent(lastUser?.content || "");
+    streamChat(msgs.map(({ role, content }) => ({ role, content })), undefined, hidden, detectedAgent);
+  }, [messages, setMessages, streamChat, agentOverride]);
 
   const handleEditStart = (msg: StoredMessage) => { if (msg.role !== "user") return; setEditingId(msg.id); setEditValue(msg.content); };
   const handleEditSave = async () => {
@@ -435,7 +448,8 @@ export default function ChatPage() {
     const ragBlock = formatContext(ragContext);
     const memoryBlock = getMemoryContext();
     const hidden = [ragBlock, memoryBlock].filter(Boolean).join("\n") || undefined;
-    streamChat(updated.map(({ role, content }) => ({ role, content })), undefined, hidden);
+    const detectedAgent = agentOverride ?? routeUserIntent(editValue.trim());
+    streamChat(updated.map(({ role, content }) => ({ role, content })), undefined, hidden, detectedAgent);
   };
   const handleEditCancel = () => { setEditingId(null); setEditValue(""); };
 
@@ -537,29 +551,19 @@ export default function ChatPage() {
   // ── Voice Input ─────────────────────────────────
 
   const startRecording = useCallback(() => {
-    const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognitionAPI) { setFileErrors(["Voice input is not supported in this browser."]); return; }
-    const recognition = new SpeechRecognitionAPI();
-    recognition.lang = "en-US";
-    recognition.interimResults = true;
-    recognition.continuous = true;
-    recognitionRef.current = recognition;
+    if (!voiceSettings.voiceInputEnabled) return;
+    const engine = createSTTEngine("en-US");
+    if (!engine.isSupported()) { setFileErrors(["Voice input is not supported in this browser."]); return; }
+    sttEngineRef.current = engine;
     setIsRecording(true);
-    recognition.onresult = (event: any) => {
-      const results: { transcript: string }[][] = event.results;
-      const transcript = results
-        .map((r) => r[0].transcript)
-        .join("");
-      setInput(transcript);
-    };
-    recognition.onerror = () => { setIsRecording(false); };
-    recognition.onend = () => { setIsRecording(false); };
-    recognition.start();
-  }, [setFileErrors]);
+    engine.start((text, isFinal) => {
+      setInput((prev) => isFinal ? prev + text + " " : prev + text);
+    });
+  }, [voiceSettings.voiceInputEnabled, setFileErrors]);
 
   const stopRecording = useCallback(() => {
-    recognitionRef.current?.stop();
-    recognitionRef.current = null;
+    sttEngineRef.current?.stop();
+    sttEngineRef.current = null;
     setIsRecording(false);
   }, []);
 
@@ -595,17 +599,12 @@ export default function ChatPage() {
 
   const handleTTS = useCallback((text: string) => {
     if (!("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-    try {
-      const voices = window.speechSynthesis.getVoices();
-      const preferred = voices.find((v) => v.lang.startsWith("en") && v.name.includes("Natural"));
-      if (preferred) utterance.voice = preferred;
-    } catch {}
-    window.speechSynthesis.speak(utterance);
-  }, []);
+    if (isSpeaking()) stopSpeech();
+    const profile = getVoiceProfile(voiceSettings.activeVoiceId) || VOICE_PROFILES[0];
+    ensureVoices().then(() => {
+      speakLong(text, profile, { pitch: voiceSettings.pitch, rate: voiceSettings.rate });
+    });
+  }, [voiceSettings]);
 
   // ── Artifact Handlers ─────────────────────────────
 
@@ -630,7 +629,7 @@ export default function ChatPage() {
 
   // ── Render ──────────────────────────────────────
   return (
-    <div className={`flex h-screen overflow-hidden ${isDark ? "bg-[#212121]" : "bg-white"}`}
+    <div suppressHydrationWarning className={`flex h-screen overflow-hidden ${isDark ? "bg-[#212121]" : "bg-white"}`}
       style={{ color: isDark ? "#e4e4e7" : "#18181b" }}>
       {/* Overlay */}
       <AnimatePresenceWrapper show={sidebarOpen}>
