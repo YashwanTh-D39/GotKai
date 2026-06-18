@@ -20,7 +20,7 @@ export function createGroqProvider(): LLMProvider {
       const apiKey = process.env.GROQ_API_KEY!;
 
       const body = {
-        model: config.model || "llama-3.3-70b-versatile",
+        model: "llama-3.3-70b-versatile",
         messages,
         temperature: config.temperature ?? 0.3,
         top_p: config.top_p ?? 0.9,

@@ -20,7 +20,7 @@ export function createNvidiaProvider(): LLMProvider {
       const apiKey = process.env.NVIDIA_NIM_API_KEY!;
 
       const body = {
-        model: config.model || "meta/llama-3.1-70b-instruct",
+        model: "meta/llama-3.1-70b-instruct",
         messages,
         temperature: config.temperature ?? 0.3,
         top_p: config.top_p ?? 0.9,
