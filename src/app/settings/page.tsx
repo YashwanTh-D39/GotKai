@@ -374,14 +374,15 @@ export default function SettingsPage() {
                       }`}>
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-lg">{v.emoji}</span>
-                        <button onClick={(e) => { e.stopPropagation(); handlePreviewVoice(v.id); }}
-                          className={`text-xs px-2 py-0.5 rounded-lg transition-colors ${
+                        <span role="button" tabIndex={0} onClick={(e) => { e.stopPropagation(); handlePreviewVoice(v.id); }}
+                          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); handlePreviewVoice(v.id); } }}
+                          className={`text-xs px-2 py-0.5 rounded-lg transition-colors cursor-pointer ${
                             previewingId === v.id
                               ? "bg-indigo-600 text-white"
                               : isDark ? "bg-zinc-800 text-zinc-400 hover:text-zinc-200" : "bg-zinc-200 text-zinc-500 hover:text-zinc-700"
                           }`}>
                           {previewingId === v.id ? "Playing..." : "Preview"}
-                        </button>
+                        </span>
                       </div>
                       <div className={`text-sm font-medium ${isDark ? "text-zinc-200" : "text-zinc-800"}`}>{v.name}</div>
                       <div className={`text-[11px] mt-0.5 leading-relaxed ${isDark ? "text-zinc-500" : "text-zinc-400"}`}>{v.description}</div>
